@@ -12,7 +12,7 @@
 trap shutdown INT
 
 # track start time
-APPLICATION_START_TIME=$(ruby -e 'puts Time.now.to_f');
+APPLICATION_START_TIME=$(date +%s);
 
 # define application to be auto startet in case of testing purpose for example
 : "${APPLICATION_AUTOSTART:=1}"
@@ -229,7 +229,7 @@ function print_header() {
 function print_footer() {
     LC_NUMERIC="en_US.UTF-8"
 
-    APPLICATION_END_TIME=$(ruby -e 'puts Time.now.to_f')
+    APPLICATION_END_TIME=$(date +%s)
     APPLICATION_EXECUTION_TIME=$(echo "$APPLICATION_END_TIME - $APPLICATION_START_TIME" | bc);
 
     printf "\\n"
