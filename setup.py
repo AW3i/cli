@@ -5,4 +5,5 @@ setup(
     version='1.0',
     license='Creative Commons Attribution-Noncommercial-Share Alike license',
     long_description=open('README.md').read(),
+    scripts=['valet.sh']
 )
