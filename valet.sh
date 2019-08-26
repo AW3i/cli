@@ -37,14 +37,15 @@ SEMVER_REGEX='^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(\-[0-9A-Za-z-]+
 ANSIBLE_PLAYBOOKS_DIR="playbooks"
 # define global temp dir
 TEMP_DIR="/tmp"
+# define application prefix path
+APPLICATION_PREFIX_PATH="/usr/share"
 # temporary application-in-progress file used e.g. by ansible or spinner function
 export APPLICATION_INPROGRESS_FILE_PATH="${TEMP_DIR}/.valet-sh_${APPLICATION_START_TIME}.inprogress"
 # define default install directory
-APPLICATION_REPO_DIR="/usr/local/${APPLICATION_GIT_NAMESPACE}/${APPLICATION_GIT_REPOSITORY}";
-# resolve symlinked bash source if needed
-test -h "${BASH_SOURCE[0]}" && SCRIPT_PATH="$(readlink "${BASH_SOURCE[0]}")" || SCRIPT_PATH="${BASH_SOURCE[0]}"
+APPLICATION_REPO_DIR="${APPLICATION_PREFIX_PATH}/${APPLICATION_GIT_NAMESPACE}/${APPLICATION_GIT_REPOSITORY}"
 # use current bash source script dir as base_dir
-BASE_DIR="$( dirname "${SCRIPT_PATH}" )"
+BASE_DIR=${BASE_DIR:=${APPLICATION_REPO_DIR}}
+
 # define log filepath
 LOG_PATH=${BASE_DIR}/log
 
@@ -196,7 +197,7 @@ function self_upgrade() {
     # fetch all tags from application git repo
     git --git-dir="${APPLICATION_REPO_DIR}/.git" --work-tree="${APPLICATION_REPO_DIR}" fetch --tags --quiet
     # get available release tags sorted by refname
-    GIT_TAGS=$(git --git-dir="${APPLICATION_REPO_DIR}/.git" --work-tree="${APPLICATION_REPO_DIR}" tag --sort "-v:refname" )
+    GIT_TAGS=$(git --git-dir="${APPLICATION_REPO_DIR}/.git" --work-tree="${APPLICATION_REPO_DIR}" tag --sort "-v:refname" | grep ${OSTYPE})
     # get latest semver conform git version tag on current major version releases
     for GIT_TAG in ${GIT_TAGS}; do
         if [[ "${GIT_TAG}" =~ ${SEMVER_REGEX} ]]; then
