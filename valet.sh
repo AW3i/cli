@@ -38,7 +38,7 @@ ANSIBLE_PLAYBOOKS_DIR="playbooks"
 # define global temp dir
 TEMP_DIR="/tmp"
 # define application prefix path
-APPLICATION_PREFIX_PATH="/usr/share"
+APPLICATION_PREFIX_PATH="/usr/local"
 # temporary application-in-progress file used e.g. by ansible or spinner function
 export APPLICATION_INPROGRESS_FILE_PATH="${TEMP_DIR}/.valet-sh_${APPLICATION_START_TIME}.inprogress"
 # define default install directory
