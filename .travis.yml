@@ -1,0 +1,16 @@
+language: bash
+
+matrix:
+  include:
+    - os: linux
+      dist: bionic
+
+addons:
+  apt:
+    packages:
+      - shellcheck
+    update: true
+
+script:
+  - shellcheck valet.sh
+
