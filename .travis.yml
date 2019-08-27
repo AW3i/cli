@@ -13,3 +13,4 @@ addons:
 
 script:
   - shellcheck valet.sh
+  - tests/test_functions.bats
