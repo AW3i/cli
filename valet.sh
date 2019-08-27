@@ -197,7 +197,7 @@ function self_upgrade() {
     # fetch all tags from application git repo
     git --git-dir="${APPLICATION_REPO_DIR}/.git" --work-tree="${APPLICATION_REPO_DIR}" fetch --tags --quiet
     # get available release tags sorted by refname
-    GIT_TAGS=$(git --git-dir="${APPLICATION_REPO_DIR}/.git" --work-tree="${APPLICATION_REPO_DIR}" tag --sort "-v:refname" | grep ${OSTYPE})
+    GIT_TAGS=$(git --git-dir="${APPLICATION_REPO_DIR}/.git" --work-tree="${APPLICATION_REPO_DIR}" tag --sort "-v:refname" | grep "${OSTYPE}")
     # get latest semver conform git version tag on current major version releases
     for GIT_TAG in ${GIT_TAGS}; do
         if [[ "${GIT_TAG}" =~ ${SEMVER_REGEX} ]]; then
