@@ -466,7 +466,7 @@ function process_args() {
         # handle remaining args if given
         if [ -n "$*" ]; then
             case "${1--h}" in
-                self-upgrade) self-upgrade;;
+                self-upgrade) self_upgrade;;
                 # try to execute playbook based on command
                 # ansible will throw an error if specific playbook does not exist
                 *) execute_ansible_playbook "$parsed_command" "$parsed_args" "$parsed_opts";;
