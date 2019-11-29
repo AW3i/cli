@@ -25,6 +25,8 @@ APPLICATION_RETURN_CODE_SUCCESS=0
 APPLICATION_RETURN_CODE=$APPLICATION_RETURN_CODE_SUCCESS
 # define default setting for debug info output
 APPLICATION_DEBUG_INFO_ENABLED=0;
+# define default help behaviour output
+APPLICATION_HELP_INFO_ENABLED=0;
 # define variables
 APPLICATION_NAME="valet.sh"
 # define default git relevant variables
@@ -265,30 +267,81 @@ function print_footer() {
 function print_usage() {
     local cmd_output_space='                '
     local cmd_name="-x"
-    printf "\\e[33mUsage:\\e[39m\\n"
-    printf "  command [options] [command] [arguments]\\n"
-    printf "\\n"
-    printf "\\e[33mOptions:\\e[39m\\n"
-    printf "\\e[32m  -h %s \\e[39mDisplay this help message\\n" "${cmd_output_space:${#cmd_name}}"
-    printf "\\e[32m  -v %s \\e[39mDisplay this application version\\n" "${cmd_output_space:${#cmd_name}}"
-    printf "\\e[32m  -d %s \\e[39mDisplay debug information\\n" "${cmd_output_space:${#cmd_name}}"
-    printf "\\n"
-    printf "\\e[33mCommands:\\e[39m\\n"
 
-    local cmd_name="self-upgrade"
-    local cmd_description="Upgrade valet.sh itself to latest version"
-    printf "  \\e[32m%s %s \\e[39m${cmd_description}\\n" "${cmd_name}" "${cmd_output_space:${#cmd_name}}"
+    # show general help if no specific command was given
+    if [[ -z "$1" ]]; then
 
-    if [ -d "$BASE_DIR/playbooks" ]; then
-        for file in ./playbooks/**.yml; do
-            local cmd_name
-            cmd_name="$(basename "${file}" .yml)"
-            local cmd_description
-            cmd_description=$(grep '^\#[[:space:]]@description:' -m 1 "${file}" | awk -F'"' '{ print $2}');
-            if [ -n "${cmd_description}" ]; then
-                printf "  \\e[32m%s %s \\e[39m${cmd_description}\\n" "${cmd_name}" "${cmd_output_space:${#cmd_name}}"
+        printf "\\e[33mUsage:\\e[39m\\n"
+        printf "  command [options] [command] [arguments]\\n"
+        printf "\\n"
+        printf "\\e[33mOptions:\\e[39m\\n"
+        printf "\\e[32m  -h %s \\e[39mDisplay this help message\\n" "${cmd_output_space:${#cmd_name}}"
+        printf "\\e[32m  -v %s \\e[39mDisplay this application version\\n" "${cmd_output_space:${#cmd_name}}"
+        printf "\\e[32m  -d %s \\e[39mDisplay debug information\\n" "${cmd_output_space:${#cmd_name}}"
+        printf "\\n"
+        printf "\\e[33mCommands:\\e[39m\\n"
+
+        local cmd_name="self-upgrade"
+        local cmd_description="Upgrade valet.sh itself to latest version"
+        printf "  \\e[32m%s %s \\e[39m${cmd_description}\\n" "${cmd_name}" "${cmd_output_space:${#cmd_name}}"
+
+        if [ -d "$BASE_DIR/playbooks" ]; then
+            for file in ./playbooks/**.yml; do
+                local cmd_name
+                cmd_name="$(basename "${file}" .yml)"
+                local cmd_description
+                cmd_description=$(grep '^\#[[:space:]]@description:' -m 1 "${file}" | awk -F'"' '{ print $2}');
+                if [ -n "${cmd_description}" ]; then
+                    printf "  \\e[32m%s %s \\e[39m${cmd_description}\\n" "${cmd_name}" "${cmd_output_space:${#cmd_name}}"
+                fi
+            done
+        fi
+    else
+        # parse command specific playbook if command was given
+        cmd_file="$BASE_DIR/playbooks/$1.yml"
+        cmd_type=""
+        cmd_help=""
+
+        # check if requested playbook yml exist and execute it
+        if [ ! -f "$cmd_file" ]; then
+            out error "Command '$1' not available"
+            shutdown
+        fi
+
+        # parse playbook file for comment header informations
+        while read -r line; do
+            if [[ ${line} = "# @command:"*  ]] ; then
+                cmd_type="command"
+                cmd_name=$(echo "${line}" | grep '^\#[[:space:]]@command:' -m 1 | awk -F'"' '{ print $2}');
+                continue
             fi
-        done
+            if [[ ${line} = "# @description:"*  ]] ; then
+                cmd_type="description"
+                cmd_description=$(echo "${line}" | grep '^\#[[:space:]]@description:' -m 1 | awk -F'"' '{ print $2}');
+                continue
+            fi
+            if [[ ${line} = "# @usage:"*  ]] ; then
+                cmd_usage=$(echo "${line}" | grep '^\#[[:space:]]@usage:' -m 1 | awk -F'"' '{ print $2}');
+                cmd_type="usage"
+                continue
+            fi
+            if [[ ${line} = "# @help:"*  ]] ; then
+                cmd_type="help"
+                continue
+            fi
+            if [[ ${cmd_type} == "help" ]] ; then
+                cmd_help+="${line}"
+                cmd_help+=$'\n'
+            fi
+        done < "${cmd_file}"
+
+        printf "\\e[33mHelp:\\e[39m\\e[32m %s\\e[39m\\n" "${cmd_name}"
+        printf "  %s\\n" "${cmd_description}"
+        printf "\\n"
+        printf "\\e[33mUsage:\\e[39m\\n"
+        printf "  %s\\n" "${cmd_usage}"
+        printf "\\n"
+        printf "%s\\n" "${cmd_help}"
     fi
 }
 
@@ -416,7 +469,6 @@ function process_args() {
         print_usage
     else
         # parse options first and handle it
-        
         for i in "$@"; do
 
             # parse double dash options (ansible)
@@ -447,8 +499,8 @@ function process_args() {
                         shift
                         ;;
                     -h)
-                        # print usage for help
-                        print_usage
+                        # print usage for help then shutdown
+                        export APPLICATION_HELP_INFO_ENABLED=1
                         shift
                         ;;
                     -*)
@@ -469,6 +521,13 @@ function process_args() {
                 fi
             fi
         done;
+
+        # if help info was enabled by "-h" output help
+        if [ "$APPLICATION_HELP_INFO_ENABLED" = 1 ];
+        then
+            print_usage "${parsed_command}"
+            shutdown
+        fi
 
         # handle remaining args if given
         if [ -n "$*" ]; then
