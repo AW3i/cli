@@ -27,6 +27,8 @@ APPLICATION_RETURN_CODE=$APPLICATION_RETURN_CODE_SUCCESS
 APPLICATION_DEBUG_INFO_ENABLED=0;
 # define default help behaviour output
 APPLICATION_HELP_INFO_ENABLED=0;
+# define default force behaviour
+APPLICATION_FORCE_INFO_ENABLED=0;
 # define variables
 APPLICATION_NAME="valet.sh"
 # define default git relevant variables
@@ -55,6 +57,8 @@ LOG_PATH=${BASE_DIR}/log
 if [ -d "${BASE_DIR}/.git" ]; then
     # get the current version from git repository in base dir
     APPLICATION_VERSION=$(git --git-dir="${BASE_DIR}/.git" --work-tree="${BASE_DIR}" describe --tags)
+    # create version map to extract major, minor and build parts later on
+    APPLICATION_VERSION_MAP=( ${APPLICATION_VERSION//./ } )
 fi
 
 ##############################################################################
@@ -119,6 +123,7 @@ spinner_toggle() {
 function out() {
     case "${1--h}" in
         error) printf "\\033[1;31m✘ %s\\033[0m\\n" "$2";;
+        warning) printf "\\033[1;33m⚠ %s\\033[0m\\n" "$2";;
         success) printf "\\033[1;32m✔ %s\\033[0m\\n" "$2";;
         task) printf "▸ %s\\n" "$2";;
         *) printf "%s\\n" "$*";;
@@ -195,11 +200,32 @@ function prepare() {
 # Upgrade meachanism of valet.sh itself
 ##############################################################################
 function self_upgrade() {
+    # define default git tag filter based on major version
+    GIT_TAG_FILTER="^${APPLICATION_VERSION_MAP[0]}.*${OSTYPE}";
+    # check if force self_upgrade was triggered
+    if [ $APPLICATION_FORCE_INFO_ENABLED = 1 ]; then
+        out warning "CAUTION! This will trigger a major version update if it's available."
+        read -r -p "Are You Sure? [Y/n] " input
+        echo "";
+        case $input in
+            [yY][eE][sS]|[yY])
+            GIT_TAG_FILTER=".*${OSTYPE}"
+        ;;
+            [nN][oO]|[nN])
+        exit 1
+        ;;
+            *)
+        out error "Invalid input '$input'"
+        shutdown
+        ;;
+        esac
+    fi
+
     spinner_toggle "Upgrading" -f
     # fetch all tags from application git repo
     git --git-dir="${APPLICATION_REPO_DIR}/.git" --work-tree="${APPLICATION_REPO_DIR}" fetch --tags --quiet
     # get available release tags sorted by refname
-    GIT_TAGS=$(git --git-dir="${APPLICATION_REPO_DIR}/.git" --work-tree="${APPLICATION_REPO_DIR}" tag --sort "-v:refname" | grep "${OSTYPE}")
+    GIT_TAGS=$(git --git-dir="${APPLICATION_REPO_DIR}/.git" --work-tree="${APPLICATION_REPO_DIR}" tag --sort "-v:refname" | grep "${GIT_TAG_FILTER}")
     # get latest semver conform git version tag on current major version releases
     for GIT_TAG in ${GIT_TAGS}; do
         if [[ "${GIT_TAG}" =~ ${SEMVER_REGEX} ]]; then
@@ -282,7 +308,7 @@ function print_usage() {
         printf "\\e[33mCommands:\\e[39m\\n"
 
         local cmd_name="self-upgrade"
-        local cmd_description="Upgrade valet.sh itself to latest version"
+        local cmd_description="Upgrade valet.sh itself to latest version."
         printf "  \\e[32m%s %s \\e[39m${cmd_description}\\n" "${cmd_name}" "${cmd_output_space:${#cmd_name}}"
 
         if [ -d "$BASE_DIR/playbooks" ]; then
@@ -501,6 +527,11 @@ function process_args() {
                     -h)
                         # print usage for help then shutdown
                         export APPLICATION_HELP_INFO_ENABLED=1
+                        shift
+                        ;;
+                    -f)
+                        # enable force info
+                        export APPLICATION_FORCE_INFO_ENABLED=1
                         shift
                         ;;
                     -*)
