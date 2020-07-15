@@ -2,7 +2,13 @@ from distutils.core import setup
 
 setup(
     name='valet-sh-cli',
-    version='1.1.1',
+    author='Johann Zelger',
+    author_email='j.zelger@techdivision.com',
+    summary='valet.sh command line interface written in bash',
+    url='https://github.com/valet-sh/cli',
+    maintainer='Johann Zelger',
+    maintainer_email='j.zelger@techdivision.com',
+    version='1.1.2',
     license='Creative Commons Attribution-Noncommercial-Share Alike license',
     long_description=open('README.md').read(),
     scripts=['valet.sh']
