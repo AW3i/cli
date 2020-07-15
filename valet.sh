@@ -57,8 +57,6 @@ LOG_PATH=${BASE_DIR}/log
 if [ -d "${BASE_DIR}/.git" ]; then
     # get the current version from git repository in base dir
     APPLICATION_VERSION=$(git --git-dir="${BASE_DIR}/.git" --work-tree="${BASE_DIR}" describe --tags)
-    # create version map to extract major, minor and build parts later on
-    APPLICATION_VERSION_MAP=( ${APPLICATION_VERSION//./ } )
 fi
 
 ##############################################################################
@@ -200,6 +198,9 @@ function prepare() {
 # Upgrade meachanism of valet.sh itself
 ##############################################################################
 function self_upgrade() {
+    # create version map to extract major, minor and build parts later on
+    version_validate "${APPLICATION_VERSION}" APPLICATION_VERSION_MAP
+    # predefine ostype to be unified
     APPLICATION_OSTYPE=""
     # define os specific filter only for macos till unirelease is ready
     if [[ "$OSTYPE" == "darwin"* ]]; then
