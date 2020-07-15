@@ -200,8 +200,13 @@ function prepare() {
 # Upgrade meachanism of valet.sh itself
 ##############################################################################
 function self_upgrade() {
+    APPLICATION_OSTYPE=""
+    # define os specific filter only for macos till unirelease is ready
+    if [[ "$OSTYPE" == "darwin"* ]]; then
+        APPLICATION_OSTYPE="darwin"
+    fi
     # define default git tag filter based on major version
-    GIT_TAG_FILTER="^${APPLICATION_VERSION_MAP[0]}.*${OSTYPE}";
+    GIT_TAG_FILTER="^${APPLICATION_VERSION_MAP[0]}.*${APPLICATION_OSTYPE}";
     # check if force self_upgrade was triggered
     if [ $APPLICATION_FORCE_INFO_ENABLED = 1 ]; then
         out warning "CAUTION! This will trigger a major version update if it's available."
@@ -209,7 +214,7 @@ function self_upgrade() {
         echo "";
         case $input in
             [yY][eE][sS]|[yY])
-            GIT_TAG_FILTER=".*${OSTYPE}"
+            GIT_TAG_FILTER=".*${APPLICATION_OSTYPE}"
         ;;
             [nN][oO]|[nN])
         exit 1
@@ -226,7 +231,7 @@ function self_upgrade() {
     git --git-dir="${APPLICATION_REPO_DIR}/.git" --work-tree="${APPLICATION_REPO_DIR}" fetch --tags --quiet
     # get available release tags sorted by refname
     GIT_TAGS=$(git --git-dir="${APPLICATION_REPO_DIR}/.git" --work-tree="${APPLICATION_REPO_DIR}" tag --sort "-v:refname" | grep "${GIT_TAG_FILTER}")
-    # get latest semver conform git version tag on current major version releases
+    # get latest semver conform git version tag
     for GIT_TAG in ${GIT_TAGS}; do
         if [[ "${GIT_TAG}" =~ ${SEMVER_REGEX} ]]; then
             git --git-dir="${APPLICATION_REPO_DIR}/.git" --work-tree="${APPLICATION_REPO_DIR}" checkout --force --quiet "${GIT_TAG}"
@@ -236,9 +241,9 @@ function self_upgrade() {
 
     # update dependencies based on os type
     if [[ "$OSTYPE" == "linux-gnu" ]]; then
-        pip3 install -Iq -r ${APPLICATION_REPO_DIR}/requirements.txt
+        pip3 install -Iq -r ${APPLICATION_REPO_DIR}/requirements.txt> /dev/null 2>&1
     elif [[ "$OSTYPE" == "darwin"* ]]; then
-        sudo pip install -Iq -r ${APPLICATION_REPO_DIR}/requirements.txt
+        sudo pip install -Iq -r ${APPLICATION_REPO_DIR}/requirements.txt > /dev/null 2>&1
     fi
 
     # stop spinner
