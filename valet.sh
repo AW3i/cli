@@ -241,9 +241,9 @@ function self_upgrade() {
 
     # update dependencies based on os type
     if [[ "$OSTYPE" == "linux-gnu" ]]; then
-        pip3 install -Iq -r ${APPLICATION_REPO_DIR}/requirements.txt> /dev/null 2>&1
+        pip3 install -q -r ${APPLICATION_REPO_DIR}/requirements.txt> /dev/null 2>&1
     elif [[ "$OSTYPE" == "darwin"* ]]; then
-        sudo pip install -Iq -r ${APPLICATION_REPO_DIR}/requirements.txt > /dev/null 2>&1
+        sudo pip install -q -r ${APPLICATION_REPO_DIR}/requirements.txt > /dev/null 2>&1
     fi
 
     # stop spinner
