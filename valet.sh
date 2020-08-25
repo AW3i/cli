@@ -43,8 +43,6 @@ ANSIBLE_PLAYBOOKS_DIR="playbooks"
 TEMP_DIR="/tmp"
 # define application prefix path
 APPLICATION_PREFIX_PATH="/usr/local"
-# temporary application-in-progress file used e.g. by ansible or spinner function
-export APPLICATION_INPROGRESS_FILE_PATH="${TEMP_DIR}/.valet-sh_${APPLICATION_START_TIME}.inprogress"
 # define default install directory
 APPLICATION_REPO_DIR="${APPLICATION_PREFIX_PATH}/${APPLICATION_GIT_NAMESPACE}/${APPLICATION_GIT_REPOSITORY}"
 # use current bash source script dir as base_dir
@@ -82,8 +80,6 @@ spinner_toggle() {
                      "$(echo -e '\xe2\xa0\x8f')" )
         local i=0
         tput sc
-        # wait for .inprogress flag file to be created by ansible callback plugin
-        while [ ! -f "$APPLICATION_INPROGRESS_FILE_PATH" ]; do sleep 0.5; done
         while true; do
             printf "\\e[32m%s\\e[39m $1 " "${list[i]}"
             i=$((i+1))
@@ -97,17 +93,11 @@ spinner_toggle() {
         kill "$SPINNER_PID" > /dev/null 2>&1
         wait "$!" 2>/dev/null
         SPINNER_PID=0
-        rm -rf "$APPLICATION_INPROGRESS_FILE_PATH"
         tput rc
     }
     # check if spinner pid doen not exist
     if [[ "$SPINNER_PID" -lt 1 ]]; then
         tput sc
-        # if function has $2 given with -f then force spinner to start on
-        # toggle call by touching inprogress file on its own
-        if [[ "$#" -eq "2" && "$2" = "-f" ]]; then
-            touch "$APPLICATION_INPROGRESS_FILE_PATH"
-        fi
         _spinner_start "$1" &
         SPINNER_PID="$!"
     else
@@ -227,7 +217,7 @@ function self_upgrade() {
         esac
     fi
 
-    spinner_toggle "Upgrading" -f
+    spinner_toggle "Upgrading"
     # fetch all tags from application git repo
     git --git-dir="${APPLICATION_REPO_DIR}/.git" --work-tree="${APPLICATION_REPO_DIR}" fetch --tags --quiet
     # get available release tags sorted by refname
@@ -424,15 +414,11 @@ EOM
     # check if requested playbook yml exist and execute it
     if [ -f "$ansible_playbook_file" ]; then
         # prepare log file
-        prepare_logfile      
+        prepare_logfile
 
         if [ "$APPLICATION_DEBUG_INFO_ENABLED" = 0 ]; then
-            # start spinner in waiting mode
-            spinner_toggle
             # execute ansible-playbook with given params and capture stdout
             ansible-playbook "${ansible_playbook_file}" "${ansible_extra_vars[@]}" || APPLICATION_RETURN_CODE=$?
-            # stop spinner
-            spinner_toggle
         else
             # execute ansible-playbook
             ansible-playbook -v "${ansible_playbook_file}" "${ansible_extra_vars[@]}" || APPLICATION_RETURN_CODE=$?
@@ -476,8 +462,6 @@ function shutdown() {
         kill "${SPINNER_PID}" &> /dev/null
         wait "$!" 2>/dev/null
     fi
-    # remove APPLICATION_INPROGRESS file
-    rm -rf "${APPLICATION_INPROGRESS_FILE_PATH}" &> /dev/null
     # exit
     if [ "$1" ]; then
         APPLICATION_RETURN_CODE=$1
