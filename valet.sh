@@ -422,12 +422,6 @@ EOM
             ansible-playbook -v "${ansible_playbook_file}" "${ansible_extra_vars[@]}" || APPLICATION_RETURN_CODE=$?
         fi
 
-        if [ $APPLICATION_RETURN_CODE = 0 ]; then
-            out success "$*"
-        else
-            out error "$*"
-        fi
-
         # cleanup logfiles
         cleanup_logfiles
         
