@@ -39,8 +39,6 @@ APPLICATION_GIT_URL=${APPLICATION_GIT_URL:="https://github.com/${APPLICATION_GIT
 SEMVER_REGEX='^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(\-!?[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?(\+[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$'
 # define default playbook dir
 ANSIBLE_PLAYBOOKS_DIR="playbooks"
-# define global temp dir
-TEMP_DIR="/tmp"
 # define application prefix path
 APPLICATION_PREFIX_PATH="/usr/local"
 # define default install directory
