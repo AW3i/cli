@@ -315,6 +315,9 @@ function print_usage() {
                 fi
             done
         fi
+        
+        printf "\\n"
+        
     else
         # parse command specific playbook if command was given
         cmd_file="$BASE_DIR/playbooks/$1.yml"
