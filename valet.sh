@@ -9,7 +9,7 @@
 ################################################################################
 
 # Set a global trap for e.g. ctrl+c to run shutdown routine
-trap shutdown INT
+trap shutdown SIGINT
 
 # track start time
 APPLICATION_START_TIME=$(date +%s);
@@ -262,9 +262,8 @@ function print_footer() {
     APPLICATION_END_TIME=$(date +%s)
     APPLICATION_EXECUTION_TIME=$(echo "$APPLICATION_END_TIME - $APPLICATION_START_TIME" | bc);
 
-    printf "\\n"
-
     if [ $APPLICATION_DEBUG_INFO_ENABLED = 1 ]; then
+        printf "\\n"
         printf "\\e[34m"
         printf "\\e[1mDebug information:\\033[0m"
         printf "\\e[34m"
@@ -392,6 +391,7 @@ function cleanup_logfiles() {
 function execute_ansible_playbook() {
     local command=$1
     local ansible_playbook_file="$ANSIBLE_PLAYBOOKS_DIR/$command.yml"
+    local ansible_options=""
     local parsed_args=$2
     local parsed_opts=$3
 
@@ -414,13 +414,13 @@ EOM
         # prepare log file
         prepare_logfile
 
-        if [ "$APPLICATION_DEBUG_INFO_ENABLED" = 0 ]; then
-            # execute ansible-playbook with given params and capture stdout
-            ansible-playbook "${ansible_playbook_file}" "${ansible_extra_vars[@]}" || APPLICATION_RETURN_CODE=$?
-        else
-            # execute ansible-playbook
-            ansible-playbook -v "${ansible_playbook_file}" "${ansible_extra_vars[@]}" || APPLICATION_RETURN_CODE=$?
+        # check if debug was enabled and set correct ansible optionsy
+        if [ "$APPLICATION_DEBUG_INFO_ENABLED" = 1 ]; then
+            ansible_options="-v"
         fi
+
+        # execute ansible-playbook
+        ansible-playbook ${ansible_options} "${ansible_playbook_file}" "${ansible_extra_vars[@]}" || APPLICATION_RETURN_CODE=$?
 
         # cleanup logfiles
         cleanup_logfiles
@@ -451,9 +451,10 @@ function error() {
 function shutdown() {
     # kill spinner by pid
     if [[ -n "${SPINNER_PID}" && "${SPINNER_PID}" -gt 0 ]]; then
-        kill "${SPINNER_PID}" &> /dev/null
+        kill -9 "${SPINNER_PID}" &> /dev/null
         wait "$!" 2>/dev/null
     fi
+
     # exit
     if [ "$1" ]; then
         APPLICATION_RETURN_CODE=$1
