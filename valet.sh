@@ -48,6 +48,7 @@ BASE_DIR=${BASE_DIR:=${APPLICATION_REPO_DIR}}
 
 # define log filepath
 LOG_PATH=${BASE_DIR}/log
+LOG_FILE=${LOG_PATH}/debug.log
 
 # check if git dir is available in base dir
 if [ -d "${BASE_DIR}/.git" ]; then
@@ -272,8 +273,6 @@ function print_footer() {
         printf "\\e[34m"
         printf "  Execution time: \\e[1m%f sec.\\033[0m\\n" "$APPLICATION_EXECUTION_TIME"
         printf "\\e[34m"
-        printf "  Logfile: \\e[1m%s\\033[0m\\n" "$LOG_FILE"
-        printf "\\e[34m"
         printf "  Exitcode: \\e[1m%s\\033[0m\\n" "$APPLICATION_RETURN_CODE"
         printf "\\e[34m\\033[0m"
         printf "\\n"
@@ -368,27 +367,6 @@ function print_usage() {
 }
 
 ##############################################################################
-# Prepares logfile
-##############################################################################
-function prepare_logfile() {
-    if [ ! -d "$LOG_PATH" ]; then
-        mkdir "$LOG_PATH" || log error "Failed to create log directory"
-    fi
-    LOG_FILE="${LOG_PATH}/${APPLICATION_START_TIME}.log"
-    touch "${LOG_FILE}"
-}
-
-##############################################################################
-# Cleanup logfiles
-##############################################################################
-function cleanup_logfiles() {
-    # cleanup log directory and keep last 10 execution logs
-    if [ -d "$LOG_PATH" ]; then
-        find "${LOG_PATH}" -type f | sort -r | tail -n +10 | xargs rm -rf {}
-    fi
-}
-
-##############################################################################
 # Executes command via ansible playbook
 ##############################################################################
 function execute_ansible_playbook() {
@@ -414,8 +392,6 @@ EOM
 
     # check if requested playbook yml exist and execute it
     if [ -f "$ansible_playbook_file" ]; then
-        # prepare log file
-        prepare_logfile
 
         # check if debug was enabled and set correct ansible optionsy
         if [ "$APPLICATION_DEBUG_INFO_ENABLED" = 1 ]; then
@@ -424,9 +400,6 @@ EOM
 
         # execute ansible-playbook
         ansible-playbook ${ansible_options} "${ansible_playbook_file}" "${ansible_extra_vars[@]}" || APPLICATION_RETURN_CODE=$?
-
-        # cleanup logfiles
-        cleanup_logfiles
         
     else
         out error "Command '$command' not available"
