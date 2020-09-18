@@ -331,6 +331,9 @@ function print_usage() {
 
         # parse playbook file for comment header informations
         while read -r line; do
+            if [[ ${line} == "---" ]] ; then
+                break
+            fi
             if [[ ${line} = "# @command:"*  ]] ; then
                 cmd_type="command"
                 cmd_name=$(echo "${line}" | grep '^\#[[:space:]]@command:' -m 1 | awk -F'"' '{ print $2}');
@@ -351,17 +354,19 @@ function print_usage() {
                 continue
             fi
             if [[ ${cmd_type} == "help" ]] ; then
-                cmd_help+="${line}"
+                cmd_help+="  "
+                cmd_help+=$(echo "${line}" | awk -F'# ' '{ print $2}');
                 cmd_help+=$'\n'
             fi
         done < "${cmd_file}"
 
-        printf "\\e[33mHelp:\\e[39m\\e[32m %s\\e[39m\\n" "${cmd_name}"
+        printf "\\e[33mCommand:\\e[39m\\e[32m %s\\e[39m\\n" "${cmd_name}"
         printf "  %s\\n" "${cmd_description}"
         printf "\\n"
         printf "\\e[33mUsage:\\e[39m\\n"
         printf "  %s\\n" "${cmd_usage}"
         printf "\\n"
+        printf "\\e[33mHelp:\\e[39m\\n"
         printf "%s\\n" "${cmd_help}"
     fi
 }
