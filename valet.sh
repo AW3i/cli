@@ -46,10 +46,6 @@ APPLICATION_REPO_DIR="${APPLICATION_PREFIX_PATH}/${APPLICATION_GIT_NAMESPACE}/${
 # use current bash source script dir as base_dir
 BASE_DIR=${BASE_DIR:=${APPLICATION_REPO_DIR}}
 
-# define log filepath
-LOG_PATH=${BASE_DIR}/log
-LOG_FILE=${LOG_PATH}/debug.log
-
 # check if git dir is available in base dir
 if [ -d "${BASE_DIR}/.git" ]; then
     # get the current version from git repository in base dir
