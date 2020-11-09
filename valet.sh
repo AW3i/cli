@@ -179,6 +179,8 @@ function version_compare() {
 # Prepares application by installing dependencies and itself
 ##############################################################################
 function prepare() {
+    # check if root user is acting
+    if [[ ${EUID:-$(id -u)} -eq 0 ]]; then error "Please do not run valet.sh as root"; fi
     # set cwd to base dir
     cd "${BASE_DIR}" || error "Unable to set cwd to ${BASE_DIR}"
 }
