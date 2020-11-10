@@ -208,6 +208,9 @@ function self_upgrade() {
         esac
     fi
 
+    # trigger sudo password check
+    sudo true
+    # start spinner
     spinner_toggle "Upgrading"
     # fetch all tags from application git repo
     git --git-dir="${APPLICATION_REPO_DIR}/.git" --work-tree="${APPLICATION_REPO_DIR}" fetch --tags --quiet
@@ -223,7 +226,7 @@ function self_upgrade() {
 
     # update dependencies based on os type
     if [[ "$OSTYPE" == "linux-gnu" ]]; then
-        pip3 install -q -r ${APPLICATION_REPO_DIR}/requirements.txt> /dev/null 2>&1
+        sudo pip3 install -q -r ${APPLICATION_REPO_DIR}/requirements.txt> /dev/null 2>&1
     elif [[ "$OSTYPE" == "darwin"* ]]; then
         sudo pip install -q -r ${APPLICATION_REPO_DIR}/requirements.txt > /dev/null 2>&1
     fi
