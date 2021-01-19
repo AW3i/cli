@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 
 ################################################################################
-# valet.sh
+# Abstract cli integration for ansible projects or collections
 #
-# Copyright: (C) 2018 TechDivision GmbH - All Rights Reserved
+# Copyright: (C) 2021 TechDivision GmbH - All Rights Reserved
 # Author: Johann Zelger <j.zelger@techdivision.com>
 # Author: Florian Schmid <f.schmid@techdivision.com>
 ################################################################################
@@ -32,17 +32,18 @@ APPLICATION_FORCE_INFO_ENABLED=0;
 # define variables
 APPLICATION_NAME="valet.sh"
 # define default git relevant variables
-APPLICATION_GIT_NAMESPACE=${APPLICATION_GIT_NAMESPACE:="valet-sh"}
-APPLICATION_GIT_REPOSITORY=${APPLICATION_GIT_REPOSITORY:="valet-sh"}
-APPLICATION_GIT_URL=${APPLICATION_GIT_URL:="https://github.com/${APPLICATION_GIT_NAMESPACE}/${APPLICATION_GIT_REPOSITORY}"}
-# semver validator regex
-SEMVER_REGEX='^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(\-!?[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?(\+[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$'
+APPLICATION_GIT_NAMESPACE="valet-sh"
+APPLICATION_GIT_REPOSITORY="valet-sh"
+APPLICATION_GIT_URL="https://github.com/${APPLICATION_GIT_NAMESPACE}/${APPLICATION_GIT_REPOSITORY}"
+APPLICATION_INCLUDE_URL="https://raw.githubusercontent.com/${APPLICATION_GIT_NAMESPACE}/install/master/include.sh"
 # define default playbook dir
 ANSIBLE_PLAYBOOKS_DIR="playbooks"
 # define application prefix path
 APPLICATION_PREFIX_PATH="/usr/local"
 # define default install directory
 APPLICATION_REPO_DIR="${APPLICATION_PREFIX_PATH}/${APPLICATION_GIT_NAMESPACE}/${APPLICATION_GIT_REPOSITORY}"
+# define default venv directory
+APPLICATION_VENV_DIR="${APPLICATION_PREFIX_PATH}/${APPLICATION_GIT_NAMESPACE}/venv"
 # use current bash source script dir as base_dir
 BASE_DIR=${BASE_DIR:=${APPLICATION_REPO_DIR}}
 
@@ -52,53 +53,8 @@ if [ -d "${BASE_DIR}/.git" ]; then
     APPLICATION_VERSION=$(git --git-dir="${BASE_DIR}/.git" --work-tree="${BASE_DIR}" describe --tags)
 fi
 
-##############################################################################
-# Toggles spinner animation
-##############################################################################
-spinner_toggle() {
-    # check if spinner animation is globally enabled
-    if [ "${SPINNER_ENABLED}" != "1" ]
-    then
-        return 0
-    fi
-    # start spinner background function
-    function _spinner_start() {
-        local list=( "$(echo -e '\xe2\xa0\x8b')"
-                     "$(echo -e '\xe2\xa0\x99')"
-                     "$(echo -e '\xe2\xa0\xb9')"
-                     "$(echo -e '\xe2\xa0\xb8')"
-                     "$(echo -e '\xe2\xa0\xbc')"
-                     "$(echo -e '\xe2\xa0\xb4')"
-                     "$(echo -e '\xe2\xa0\xa6')"
-                     "$(echo -e '\xe2\xa0\xa7')"
-                     "$(echo -e '\xe2\xa0\x87')"
-                     "$(echo -e '\xe2\xa0\x8f')" )
-        local i=0
-        tput sc
-        while true; do
-            printf "\\e[32m%s\\e[39m $1 " "${list[i]}"
-            i=$((i+1))
-            i=$((i%10))
-            sleep 0.1
-            tput rc
-        done
-    }
-    # stop spinner background function
-    function _spinner_stop() {
-        kill "$SPINNER_PID" > /dev/null 2>&1
-        wait "$!" 2>/dev/null
-        SPINNER_PID=0
-        tput rc
-    }
-    # check if spinner pid doen not exist
-    if [[ "$SPINNER_PID" -lt 1 ]]; then
-        tput sc
-        _spinner_start "$1" &
-        SPINNER_PID="$!"
-    else
-        _spinner_stop
-    fi
-}
+# include external vars and functions
+source /dev/stdin <<< "$( curl -sS ${APPLICATION_INCLUDE_URL} )"
 
 ##############################################################################
 # Logs messages in given type
@@ -176,19 +132,27 @@ function version_compare() {
 ##############################################################################
 function prepare() {
     # check if root user is acting
-    if [[ ${EUID:-$(id -u)} -eq 0 ]]; then error "Please do not run valet.sh as root"; fi
+    if [[ ${EUID:-$(id -u)} -eq 0 ]]; then error "Please do not run ${APPLICATION_NAME} as root"; fi
     # set cwd to base dir
     cd "${BASE_DIR}" || error "Unable to set cwd to ${BASE_DIR}"
 }
 
 ##############################################################################
-# Upgrade meachanism of valet.sh itself
+# Upgrade meachanism of applications itself
 ##############################################################################
 function self_upgrade() {
+    # exit immediately if a command exits with a non-zero status
+    set -e
+    # trigger sudo password check
+    sudo true
     # create version map to extract major, minor and build parts later on
     version_validate "${APPLICATION_VERSION}" APPLICATION_VERSION_MAP
     # define default git tag filter based on major version
     GIT_TAG_FILTER="^${APPLICATION_VERSION_MAP[0]}.*";
+    # if major 1 than check if old darwin tags are filtered for macos
+    if [[ "${APPLICATION_VERSION_MAP[0]}" = "1" ]] && [[ "${OSTYPE}" = "darwin"* ]]; then
+        GIT_TAG_FILTER="${GIT_TAG_FILTER}${OSTYPE}"
+    fi
     # check if force self_upgrade was triggered
     if [ $APPLICATION_FORCE_INFO_ENABLED = 1 ]; then
         out warning "CAUTION! This will trigger a major version update if it's available."
@@ -208,36 +172,19 @@ function self_upgrade() {
         esac
     fi
 
-    # trigger sudo password check
-    sudo true
-    # start spinner
-    spinner_toggle "Upgrading"
-    # fetch all tags from application git repo
-    git --git-dir="${APPLICATION_REPO_DIR}/.git" --work-tree="${APPLICATION_REPO_DIR}" fetch --tags --quiet
-    # get available release tags sorted by refname
-    GIT_TAGS=$(git --git-dir="${APPLICATION_REPO_DIR}/.git" --work-tree="${APPLICATION_REPO_DIR}" tag --sort "-v:refname" | grep "${GIT_TAG_FILTER}")
-    # get latest semver conform git version tag
-    for GIT_TAG in ${GIT_TAGS}; do
-        if [[ "${GIT_TAG}" =~ ${SEMVER_REGEX} ]]; then
-            git --git-dir="${APPLICATION_REPO_DIR}/.git" --work-tree="${APPLICATION_REPO_DIR}" checkout --force --quiet "${GIT_TAG}"
-            break
-        fi
-    done
+    # trigger install_upgrade process
+    GIT_TAG=$(install_upgrade "${APPLICATION_GIT_URL}" "${APPLICATION_REPO_DIR}" "${GIT_TAG_FILTER}")
 
-    # update dependencies based on os type
-    if [[ "$OSTYPE" == "linux-gnu" ]]; then
-        sudo pip3 install -q -r ${APPLICATION_REPO_DIR}/requirements.txt> /dev/null 2>&1
-    elif [[ "$OSTYPE" == "darwin"* ]]; then
-        sudo pip install -q -r ${APPLICATION_REPO_DIR}/requirements.txt > /dev/null 2>&1
-    fi
-
-    # stop spinner
-    spinner_toggle
-    # output specific upgrade status message
-    if [ "$(version_compare "${APPLICATION_VERSION}" "${GIT_TAG}")" = "0" ]; then
-        out success "Already on the latest version $GIT_TAG"
-    else
+    # process specific upgrade strategy
+    if [ "$(version_compare "${APPLICATION_VERSION}" "${GIT_TAG}")" = "-1" ] || [ $APPLICATION_FORCE_INFO_ENABLED = 1 ]; then
+        # (re)install dependencies and venv
+        install_dependencies "${APPLICATION_VENV_DIR}" "${APPLICATION_REPO_DIR}"
+        # (re)link app
+        install_link "${APPLICATION_VENV_DIR}" "${APPLICATION_NAME}"
+        # (re)set system-wide symlink to be in path
         out success "Successfully upgraded from ${APPLICATION_VERSION} to latest version ${GIT_TAG}"
+    else
+        out success "Already on the latest version $GIT_TAG"
     fi
 }
 
@@ -295,7 +242,7 @@ function print_usage() {
         printf "\\e[33mCommands:\\e[39m\\n"
 
         local cmd_name="self-upgrade"
-        local cmd_description="Upgrade valet.sh itself to latest version."
+        local cmd_description="Upgrade to latest version."
         printf "  \\e[32m%s %s \\e[39m${cmd_description}\\n" "${cmd_name}" "${cmd_output_space:${#cmd_name}}"
 
         if [ -d "$BASE_DIR/playbooks" ]; then
@@ -348,6 +295,10 @@ function print_usage() {
                 cmd_type="help"
                 continue
             fi
+            if [[ ${line} = "# @sudo:"*  ]] ; then
+                sudo true
+                continue
+            fi
             if [[ ${cmd_type} == "help" ]] ; then
                 cmd_help+="  "
                 cmd_help+=$(echo "${line}" | awk -F'# ' '{ print $2}');
@@ -398,9 +349,16 @@ EOM
             ansible_options="-v"
         fi
 
+        # activate application venv if available
+        if [ -f "${APPLICATION_VENV_DIR}/bin/activate" ]; then
+            source "${APPLICATION_VENV_DIR}/bin/activate"
+        fi
+
         # execute ansible-playbook
         ansible-playbook ${ansible_options} "${ansible_playbook_file}" "${ansible_extra_vars[@]}" || APPLICATION_RETURN_CODE=$?
-        
+
+        # deactivate venv if available
+        deactivate 2>/dev/null || true
     else
         out error "Command '$command' not available"
     fi
@@ -430,7 +388,8 @@ function shutdown() {
         kill -9 "${SPINNER_PID}" &> /dev/null
         wait "$!" 2>/dev/null
     fi
-
+    # deactivate application venv
+    deactivate 2>/dev/null || true 
     # exit
     if [ "$1" ]; then
         APPLICATION_RETURN_CODE=$1
