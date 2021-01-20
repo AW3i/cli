@@ -53,9 +53,6 @@ if [ -d "${BASE_DIR}/.git" ]; then
     APPLICATION_VERSION=$(git --git-dir="${BASE_DIR}/.git" --work-tree="${BASE_DIR}" describe --tags)
 fi
 
-# include external vars and functions
-source /dev/stdin <<< "$( curl -sS ${APPLICATION_INCLUDE_URL} )"
-
 ##############################################################################
 # Logs messages in given type
 ##############################################################################
@@ -143,6 +140,8 @@ function prepare() {
 function self_upgrade() {
     # exit immediately if a command exits with a non-zero status
     set -e
+    # include external vars and functions
+    source /dev/stdin <<< "$( curl -sS ${APPLICATION_INCLUDE_URL} )"
     # trigger sudo password check
     sudo true
     # create version map to extract major, minor and build parts later on
