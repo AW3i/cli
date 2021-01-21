@@ -294,10 +294,6 @@ function print_usage() {
                 cmd_type="help"
                 continue
             fi
-            if [[ ${line} = "# @sudo:"*  ]] ; then
-                sudo true
-                continue
-            fi
             if [[ ${cmd_type} == "help" ]] ; then
                 cmd_help+="  "
                 cmd_help+=$(echo "${line}" | awk -F'# ' '{ print $2}');
@@ -470,11 +466,35 @@ function process_args() {
             fi
         done;
 
+        # build path to playbook
+        cmd_file="$BASE_DIR/playbooks/${parsed_command}.yml"
+
+        # parse playbook file to check for header information
+        while read -r line; do
+            if [[ ${line} == "---" ]] ; then
+                break
+            fi
+            if [[ ${line} = "# @sudo:"*  ]] ; then
+                export APPLICATION_SUDO_REQUIRED=1
+                continue
+            fi
+        done < "${cmd_file}"
+
         # if help info was enabled by "-h" output help
         if [ "$APPLICATION_HELP_INFO_ENABLED" = 1 ];
         then
             print_usage "${parsed_command}"
             shutdown
+        fi
+
+        # enforce a sudo password prompt if required
+        if [ "$APPLICATION_SUDO_REQUIRED" = 1 ];
+        then
+            # shutdown valet.sh when user sudo command was not successful
+            if ! sudo true;
+            then
+              shutdown
+            fi
         fi
 
         # handle remaining args if given
