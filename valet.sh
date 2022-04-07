@@ -81,7 +81,8 @@ function check_revision() {
   then
       out warning "${message}"
   else
-    DIFF=$(diff "${APPLICATION_PREFIX_PATH}/${APPLICATION_GIT_NAMESPACE}/${APPLICATION_GIT_NAMESPACE}/REVISION" "${APPLICATION_PREFIX_PATH}/${APPLICATION_GIT_NAMESPACE}/etc/REVISION")
+    diff -q "${APPLICATION_PREFIX_PATH}/${APPLICATION_GIT_NAMESPACE}/${APPLICATION_GIT_NAMESPACE}/REVISION" "${APPLICATION_PREFIX_PATH}/${APPLICATION_GIT_NAMESPACE}/etc/REVISION" > /dev/null 2>&1
+    DIFF=$?
     if [ "$DIFF" -ne "0" ]
     then
       out warning "${message}"
