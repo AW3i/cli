@@ -8,7 +8,7 @@ setup(
     url='https://github.com/valet-sh/cli',
     maintainer='Johann Zelger',
     maintainer_email='j.zelger@techdivision.com',
-    version='1.3.3',
+    version='1.4.0',
     license='Creative Commons Attribution-Noncommercial-Share Alike license',
     long_description=open('README.md').read(),
     scripts=['valet.sh']
