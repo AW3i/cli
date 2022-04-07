@@ -66,6 +66,59 @@ function out() {
     esac
 }
 
+##############################################################################
+# checks the installed revision
+##############################################################################
+function check_revision() {
+  local message="CAUTION! Outdated installation - please run 'valet.sh install'"
+
+  if [ ! -f "${APPLICATION_PREFIX_PATH}/${APPLICATION_GIT_NAMESPACE}/${APPLICATION_GIT_NAMESPACE}/REVISION" ]
+  then
+    return
+  fi
+
+  if [ ! -f "${APPLICATION_PREFIX_PATH}/${APPLICATION_GIT_NAMESPACE}/etc/REVISION" ]
+  then
+      out warning "${message}"
+  else
+    DIFF=$(diff "${APPLICATION_PREFIX_PATH}/${APPLICATION_GIT_NAMESPACE}/${APPLICATION_GIT_NAMESPACE}/REVISION" "${APPLICATION_PREFIX_PATH}/${APPLICATION_GIT_NAMESPACE}/etc/REVISION")
+    if [ "$DIFF" -ne "0" ]
+    then
+      out warning "${message}"
+    fi
+  fi
+
+}
+
+##############################################################################
+# checks the last upgrade
+##############################################################################
+function check_last_upgrade() {
+  local message="Installation is more than 30 days old - please run 'valet.sh self-upgrade'"
+      # check if there is linux and modify command opts
+    if [[ "$OSTYPE" == "linux-gnu" ]]; then
+      if [[ $(date +'%s' --date='30 days ago') > $(stat -c %Y "${APPLICATION_PREFIX_PATH}/${APPLICATION_GIT_NAMESPACE}/${APPLICATION_GIT_NAMESPACE}") ]]; then
+        out warning "${message}"
+      fi
+    else
+      currentDate=$(date +'%s')
+      max_age_date=$((currentDate-2592000))
+      last_upgrade_date=$(stat -f "%m" "${APPLICATION_PREFIX_PATH}/${APPLICATION_GIT_NAMESPACE}/${APPLICATION_GIT_NAMESPACE}")
+
+      if [[ $max_age_date > $last_upgrade_date ]]; then
+        out warning "${message}"
+      fi
+    fi
+}
+
+##############################################################################
+# checks the last self-upgrade
+##############################################################################
+function up2date_check() {
+  check_last_upgrade
+  check_revision
+}
+
 #######################################
 # Validates version against semver
 # Globals:
@@ -185,6 +238,8 @@ function self_upgrade() {
     else
         out success "Already on the latest version $GIT_TAG"
     fi
+
+    touch "${APPLICATION_PREFIX_PATH}/${APPLICATION_GIT_NAMESPACE}/${APPLICATION_GIT_NAMESPACE}"
 }
 
 ##############################################################################
@@ -507,6 +562,7 @@ function process_args() {
 function main() {
     prepare
     print_header
+    up2date_check
     process_args "$@"
     print_footer
     shutdown
