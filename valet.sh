@@ -106,7 +106,7 @@ function check_last_upgrade() {
       max_age_date=$((currentDate-2592000))
       last_upgrade_date=$(stat -f "%m" "${APPLICATION_PREFIX_PATH}/${APPLICATION_GIT_NAMESPACE}/${APPLICATION_GIT_NAMESPACE}")
 
-      if [[ $max_age_date > $last_upgrade_date ]]; then
+      if [[ $max_age_date -gt $last_upgrade_date ]]; then
         out warning "${message}"
       fi
     fi
