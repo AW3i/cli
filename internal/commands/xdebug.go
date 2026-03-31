@@ -33,7 +33,7 @@ Examples:
   valet.sh xdebug off php83`,
 		Args: requireArgs(1, 2),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return ansible.Run(&ansible.RunOpts{
+			return ansible.Run(ansible.RunOpts{
 				Playbook: "xdebug",
 				Args:     args,
 				Verbose:  verbose,

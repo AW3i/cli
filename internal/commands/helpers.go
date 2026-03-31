@@ -31,22 +31,22 @@ import (
 //	valet.sh service            → shows `valet service --help`
 //	valet.sh service start      → runs normally
 //	valet.sh service a b c d    → prints a short error, exits 1
-func requireArgs(minArgs, maxArgs int) cobra.PositionalArgs {
+func requireArgs(min, max int) cobra.PositionalArgs {
 	return func(cmd *cobra.Command, args []string) error {
-		if len(args) < minArgs {
+		if len(args) < min {
 			// Print help to stdout (same as --help) and exit 0 — the user
 			// just didn't know the syntax, not an error worth a non-zero exit.
-			_ = cmd.Help()
+			cmd.Help() //nolint:errcheck
 			os.Exit(0)
 		}
-		if maxArgs >= 0 && len(args) > maxArgs {
-			return fmt.Errorf("accepts between %d and %d argument(s), received %d", minArgs, maxArgs, len(args))
+		if max >= 0 && len(args) > max {
+			return fmt.Errorf("accepts between %d and %d argument(s), received %d", min, max, len(args))
 		}
 		return nil
 	}
 }
 
 // requireMinArgs is a convenience wrapper for commands with no upper bound.
-func requireMinArgs(minArgs int) cobra.PositionalArgs {
-	return requireArgs(minArgs, -1)
+func requireMinArgs(min int) cobra.PositionalArgs {
+	return requireArgs(min, -1)
 }
