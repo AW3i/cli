@@ -48,7 +48,7 @@ func NewLinkCmd() *cobra.Command {
 				return fmt.Errorf("fix the errors above and try again")
 			}
 
-			return ansible.Run(&ansible.RunOpts{
+			return ansible.Run(ansible.RunOpts{
 				Playbook: "link",
 				WorkDir:  workDir,
 				Verbose:  verbose,
@@ -72,7 +72,7 @@ func NewUnlinkCmd() *cobra.Command {
 				return fmt.Errorf("getting working directory: %w", err)
 			}
 
-			return ansible.Run(&ansible.RunOpts{
+			return ansible.Run(ansible.RunOpts{
 				Playbook: "unlink",
 				WorkDir:  workDir,
 				Verbose:  verbose,
@@ -91,7 +91,7 @@ func NewLinksCmd() *cobra.Command {
 		Use:   "links",
 		Short: "List all active vhost links",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return ansible.Run(&ansible.RunOpts{
+			return ansible.Run(ansible.RunOpts{
 				Playbook: "links",
 				Verbose:  verbose,
 			})
