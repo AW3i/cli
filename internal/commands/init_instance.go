@@ -56,7 +56,7 @@ required services and runs the project-type-specific bootstrap workflow
 				}
 			}
 
-			return ansible.Run(ansible.RunOpts{
+			return ansible.Run(&ansible.RunOpts{
 				Playbook: "init-instance",
 				Args:     args,
 				WorkDir:  workDir,

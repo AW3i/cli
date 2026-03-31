@@ -63,13 +63,25 @@ fmt-check:
 	fi
 	@echo "All files properly formatted"
 
-## lint: Run golangci-lint (install separately: https://golangci-lint.run/usage/install/)
-lint:
-	golangci-lint run
+## lint: Run golangci-lint (auto-installs if not present)
+LINT_VERSION := v1.64.8
+LINT_BIN := $(shell go env GOPATH)/bin/golangci-lint
+
+lint: $(LINT_BIN)
+	$(LINT_BIN) run
+
+$(LINT_BIN):
+	@echo "Installing golangci-lint $(LINT_VERSION)..."
+	go install github.com/golangci/golangci-lint/cmd/golangci-lint@$(LINT_VERSION)
 
 ## vet: Run go vet static analysis
 vet:
 	go vet ./...
+
+## lint-ci: Run linter exactly as CI does (includes go mod download)
+lint-ci: $(LINT_BIN)
+	go mod download
+	$(LINT_BIN) run --timeout=5m
 
 ## mod-verify: Verify go.mod is tidy
 mod-verify:

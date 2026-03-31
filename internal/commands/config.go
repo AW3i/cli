@@ -33,7 +33,7 @@ Examples:
   valet.sh config list`,
 		Args: requireArgs(1, 3),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return ansible.Run(ansible.RunOpts{
+			return ansible.Run(&ansible.RunOpts{
 				Playbook: "config",
 				Args:     args,
 				Verbose:  verbose,

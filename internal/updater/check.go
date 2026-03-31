@@ -119,17 +119,17 @@ func checkDue() bool {
 
 // writeTimestamp touches the timestamp file, creating it if necessary.
 func writeTimestamp() {
-	f, err := os.OpenFile(timestampFile, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
+	f, err := os.OpenFile(timestampFile, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
 	if err != nil {
 		return
 	}
-	f.Close()
+	_ = f.Close()
 }
 
 // fetchLatestTag queries the GitHub releases API and returns the tag name.
 func fetchLatestTag() (string, error) {
 	client := &http.Client{Timeout: apiTimeout}
-	req, err := http.NewRequest(http.MethodGet, githubReleaseURL, nil)
+	req, err := http.NewRequest(http.MethodGet, githubReleaseURL, http.NoBody)
 	if err != nil {
 		return "", err
 	}
@@ -139,7 +139,9 @@ func fetchLatestTag() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	defer resp.Body.Close()
+	defer func() {
+		_ = resp.Body.Close()
+	}()
 
 	if resp.StatusCode != http.StatusOK {
 		return "", fmt.Errorf("GitHub API returned %d", resp.StatusCode)
@@ -234,6 +236,10 @@ func runUpdate() {
 // reExec replaces the current process with a fresh invocation of the same
 // binary and arguments, so the user's original command runs against the
 // newly installed version without them having to retype it.
+//
+// Note: If Exec fails, we silently continue with the current process.
+// This is acceptable because the update already succeeded; we just fall back
+// to running the command with the old binary.
 func reExec(args []string) {
 	self, err := exec.LookPath(args[0])
 	if err != nil {

@@ -69,7 +69,7 @@ Configuration is driven by a .valet-sh.yml file in each project directory.`,
 		},
 	}
 
-	// Install coloured help formatter on root — cascades to all subcommands.
+	// Install colored help formatter on root — cascades to all subcommands.
 	commands.SetHelpFormatter(cmd)
 
 	// Print version in the same style as the rest of the tool.

@@ -53,7 +53,7 @@ Services (examples):
 				normalized[1] = platform.NormalizeServiceName(normalized[1])
 			}
 
-			return ansible.Run(ansible.RunOpts{
+			return ansible.Run(&ansible.RunOpts{
 				Playbook: "service",
 				Args:     normalized,
 				Verbose:  verbose,

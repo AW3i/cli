@@ -16,8 +16,6 @@ package commands
 
 import (
 	"testing"
-
-	"github.com/spf13/cobra"
 )
 
 func TestMax(t *testing.T) {
@@ -74,13 +72,5 @@ func TestErrorPrefix(t *testing.T) {
 	if result != "✘ test error" {
 		// If it has ANSI codes, that's fine too - TTY detection varies
 		t.Logf("ErrorPrefix result: %q", result)
-	}
-}
-
-// mockCommand creates a minimal cobra command for testing
-func mockCommand() *cobra.Command {
-	return &cobra.Command{
-		Use:   "test",
-		Short: "Test command",
 	}
 }
