@@ -185,6 +185,18 @@ func parseSemver(v string) [3]int {
 	return result
 }
 
+// IsHelpOrVersionCall returns true when the user is asking for help or
+// version info — cases where an interactive update prompt is unwelcome.
+func IsHelpOrVersionCall(args []string) bool {
+	for _, a := range args[1:] {
+		switch a {
+		case "--help", "-h", "--version", "-v", "help":
+			return true
+		}
+	}
+	return false
+}
+
 // printUpdatePrompt displays the styled update notification.
 func printUpdatePrompt(current, latest string) {
 	fmt.Println()

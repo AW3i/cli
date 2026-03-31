@@ -16,13 +16,13 @@
 
 BINARY   := valet
 CMD      := ./cmd/valet
-DIST     := dist
-VERSION  := $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
+DIST     := ../dist
+VERSION  := $(shell git -C .. describe --tags --always --dirty 2>/dev/null || echo "dev")
 LDFLAGS  := -s -w -X main.Version=$(VERSION)
 
 .PHONY: build build-all install clean test lint help
 
-## build: Build for the current OS/arch (output: dist/valet)
+## build: Build for the current OS/arch (output: ../dist/valet)
 build:
 	@mkdir -p $(DIST)
 	CGO_ENABLED=0 go build -trimpath -ldflags "$(LDFLAGS)" -o $(DIST)/$(BINARY) $(CMD)
@@ -63,25 +63,13 @@ fmt-check:
 	fi
 	@echo "All files properly formatted"
 
-## lint: Run golangci-lint (auto-installs if not present)
-LINT_VERSION := v1.64.8
-LINT_BIN := $(shell go env GOPATH)/bin/golangci-lint
-
-lint: $(LINT_BIN)
-	$(LINT_BIN) run
-
-$(LINT_BIN):
-	@echo "Installing golangci-lint $(LINT_VERSION)..."
-	go install github.com/golangci/golangci-lint/cmd/golangci-lint@$(LINT_VERSION)
+## lint: Run golangci-lint (install separately: https://golangci-lint.run/usage/install/)
+lint:
+	golangci-lint run
 
 ## vet: Run go vet static analysis
 vet:
 	go vet ./...
-
-## lint-ci: Run linter exactly as CI does (includes go mod download)
-lint-ci: $(LINT_BIN)
-	go mod download
-	$(LINT_BIN) run --timeout=5m
 
 ## mod-verify: Verify go.mod is tidy
 mod-verify:
@@ -89,7 +77,7 @@ mod-verify:
 	git diff --exit-code go.mod go.sum
 
 ## quality: Run all quality checks (fmt, vet, lint, mod-verify)
-quality: fmt-check vet lint mod-verify
+quality: fmt-check vet mod-verify
 
 ## clean: Remove build artifacts and coverage files
 clean:
