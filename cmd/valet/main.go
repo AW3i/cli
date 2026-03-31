@@ -43,20 +43,26 @@ of PHP, MySQL/MariaDB, Elasticsearch/OpenSearch, Redis, RabbitMQ, and nginx
 on both Ubuntu and macOS (Intel and Apple Silicon).
 
 Configuration is driven by a .valet-sh.yml file in each project directory.`,
-		SilenceUsage:  true,
-		SilenceErrors: true,
-		Version:       Version,
+		SilenceUsage:      true,
+		SilenceErrors:     true,
+		Version:           Version,
+		DisableAutoGenTag: true,
+		CompletionOptions: cobra.CompletionOptions{DisableDefaultCmd: true},
 		// No args at root → show help.
 		// Unknown command → cobra calls RunE with the unknown token as an arg,
 		// so we show help and exit cleanly rather than printing a confusing error.
 		Args: cobra.ArbitraryArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if len(args) > 0 {
-				fmt.Fprintf(os.Stderr, "Error: unknown command %q\n\n", args[0])
+				fmt.Fprintln(os.Stderr, commands.ErrorPrefix(fmt.Sprintf("unknown command %q", args[0])))
+				fmt.Fprintln(os.Stderr)
 			}
 			return cmd.Help()
 		},
 	}
+
+	// Install coloured help formatter on root — cascades to all subcommands.
+	commands.SetHelpFormatter(cmd)
 
 	// Print version in the same style as the rest of the tool.
 	cmd.SetVersionTemplate(fmt.Sprintf("valet.sh %s\n", Version))
