@@ -20,67 +20,17 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/valet-sh/cli/internal/commands"
-	"github.com/valet-sh/cli/internal/tui"
-	"github.com/valet-sh/cli/internal/updater"
 )
 
 // Version is set at build time via -ldflags "-X main.Version=x.y.z".
 var Version = "dev"
 
 func main() {
-	// Check for --vi / -vi flag before cobra parses args so we can launch
-	// the TUI in vim mode directly.
-	vimMode := hasVIFlag(os.Args)
-	if vimMode {
-		os.Args = removeVIFlag(os.Args)
-	}
-
-	// Run the periodic update check before dispatching any command.
-	// Skipped on --help / --version / -h invocations so it never interrupts
-	// informational queries.
-	if !updater.IsHelpOrVersionCall(os.Args) {
-		updater.Check(Version, os.Args)
-	}
-
 	root := newRootCmd()
-
-	// Launch TUI when: no arguments given, OR --vi flag was passed.
-	if len(os.Args) == 1 || vimMode {
-		_, err := tui.Run(root, Version, vimMode)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "TUI error: %v\n", err)
-			os.Exit(1)
-		}
-		os.Exit(0)
-	}
-
-	// Arguments present — show the execution panel on TTY, fall back to
-	// direct cobra/ansible for non-TTY (CI, pipes).
-	if err := tui.RunWithPanel(root, os.Args[1:], Version); err != nil {
-		fmt.Fprintln(os.Stderr, commands.ErrorPrefix(err.Error()))
+	if err := root.Execute(); err != nil {
+		// cobra already prints the error; just exit non-zero.
 		os.Exit(1)
 	}
-}
-
-// hasVIFlag returns true if os.Args contains --vi or -vi.
-func hasVIFlag(args []string) bool {
-	for _, a := range args[1:] {
-		if a == "--vi" || a == "-vi" {
-			return true
-		}
-	}
-	return false
-}
-
-// removeVIFlag returns args with all --vi / -vi occurrences removed.
-func removeVIFlag(args []string) []string {
-	result := make([]string, 0, len(args))
-	for _, a := range args {
-		if a != "--vi" && a != "-vi" {
-			result = append(result, a)
-		}
-	}
-	return result
 }
 
 func newRootCmd() *cobra.Command {
@@ -93,26 +43,20 @@ of PHP, MySQL/MariaDB, Elasticsearch/OpenSearch, Redis, RabbitMQ, and nginx
 on both Ubuntu and macOS (Intel and Apple Silicon).
 
 Configuration is driven by a .valet-sh.yml file in each project directory.`,
-		SilenceUsage:      true,
-		SilenceErrors:     true,
-		Version:           Version,
-		DisableAutoGenTag: true,
-		CompletionOptions: cobra.CompletionOptions{DisableDefaultCmd: true},
+		SilenceUsage:  true,
+		SilenceErrors: true,
+		Version:       Version,
 		// No args at root → show help.
 		// Unknown command → cobra calls RunE with the unknown token as an arg,
 		// so we show help and exit cleanly rather than printing a confusing error.
 		Args: cobra.ArbitraryArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if len(args) > 0 {
-				fmt.Fprintln(os.Stderr, commands.ErrorPrefix(fmt.Sprintf("unknown command %q", args[0])))
-				fmt.Fprintln(os.Stderr)
+				fmt.Fprintf(os.Stderr, "Error: unknown command %q\n\n", args[0])
 			}
 			return cmd.Help()
 		},
 	}
-
-	// Install colored help formatter on root — cascades to all subcommands.
-	commands.SetHelpFormatter(cmd)
 
 	// Print version in the same style as the rest of the tool.
 	cmd.SetVersionTemplate(fmt.Sprintf("valet.sh %s\n", Version))
