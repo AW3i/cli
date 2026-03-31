@@ -561,12 +561,14 @@ function process_args() {
 # Main
 ##############################################################################
 function main() {
-    prepare
-    print_header
-    up2date_check
-    process_args "$@"
-    print_footer
-    shutdown
+    local vsh_go_cli="/usr/local/valet-sh/bin/valet"
+
+    if [ ! -x "${vsh_go_cli}" ]; then
+        out error "valet CLI binary not found at ${vsh_go_cli}. Please re-run the installer."
+        exit $APPLICATION_RETURN_CODE_ERROR
+    fi
+
+    exec "${vsh_go_cli}" "$@"
 }
 
 # start cli with given command line args if autostart is enabled
