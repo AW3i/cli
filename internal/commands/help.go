@@ -34,7 +34,7 @@ const (
 )
 
 // isTerminal reports whether w is connected to a TTY. When output is piped
-// or redirected we skip all ANSI codes, matching fatih/color behaviour
+// or redirected we skip all ANSI codes, matching fatih/color behavior
 // without adding a dependency.
 func isTerminal(w io.Writer) bool {
 	if f, ok := w.(*os.File); ok {
@@ -88,62 +88,62 @@ func helpFunc() func(*cobra.Command, []string) {
 			desc = cmd.Short
 		}
 		if desc != "" {
-			fmt.Fprintln(w, desc)
-			fmt.Fprintln(w)
+			_, _ = fmt.Fprintln(w, desc)
+			_, _ = fmt.Fprintln(w)
 		}
 
 		// Usage line.
 		if cmd.Runnable() || cmd.HasAvailableSubCommands() {
-			fmt.Fprintln(w, blue(w, "▶ Usage"))
+			_, _ = fmt.Fprintln(w, blue(w, "▶ Usage"))
 			if cmd.Runnable() {
-				fmt.Fprintf(w, "  %s\n", cmd.UseLine())
+				_, _ = fmt.Fprintf(w, "  %s\n", cmd.UseLine())
 			}
 			if cmd.HasAvailableSubCommands() {
-				fmt.Fprintf(w, "  %s [command]\n", cmd.CommandPath())
+				_, _ = fmt.Fprintf(w, "  %s [command]\n", cmd.CommandPath())
 			}
-			fmt.Fprintln(w)
+			_, _ = fmt.Fprintln(w)
 		}
 
 		// Subcommand listing.
 		if cmd.HasAvailableSubCommands() {
-			fmt.Fprintln(w, blue(w, "▶ Available Commands"))
+			_, _ = fmt.Fprintln(w, blue(w, "▶ Available Commands"))
 			for _, sub := range cmd.Commands() {
 				if sub.IsAvailableCommand() {
-					padding := strings.Repeat(" ", max(1, 14-len(sub.Name())))
-					fmt.Fprintf(w, "  %s%s%s\n",
+					padding := strings.Repeat(" ", maxInt(1, 14-len(sub.Name())))
+					_, _ = fmt.Fprintf(w, "  %s%s%s\n",
 						green(w, sub.Name()),
 						padding,
 						sub.Short,
 					)
 				}
 			}
-			fmt.Fprintln(w)
+			_, _ = fmt.Fprintln(w)
 		}
 
 		// Flags.
 		flags := cmd.LocalFlags()
 		if cmd.HasAvailableLocalFlags() {
-			fmt.Fprintln(w, blue(w, "▶ Flags"))
-			fmt.Fprintln(w, flags.FlagUsages())
+			_, _ = fmt.Fprintln(w, blue(w, "▶ Flags"))
+			_, _ = fmt.Fprintln(w, flags.FlagUsages())
 		}
 
 		// Inherited flags (only shown if there are any beyond help).
 		if cmd.HasAvailableInheritedFlags() {
-			fmt.Fprintln(w, blue(w, "▶ Global Flags"))
-			fmt.Fprintln(w, cmd.InheritedFlags().FlagUsages())
+			_, _ = fmt.Fprintln(w, blue(w, "▶ Global Flags"))
+			_, _ = fmt.Fprintln(w, cmd.InheritedFlags().FlagUsages())
 		}
 
 		// Hint line.
 		if cmd.HasAvailableSubCommands() {
-			fmt.Fprintf(w, "%s\n",
+			_, _ = fmt.Fprintf(w, "%s\n",
 				blue(w, fmt.Sprintf(`Use "%s [command] --help" for more information about a command.`, cmd.CommandPath())),
 			)
 		}
 	}
 }
 
-// max returns the larger of a and b (stdlib max requires Go 1.21+).
-func max(a, b int) int {
+// maxInt returns the larger of a and b (stdlib max requires Go 1.21+).
+func maxInt(a, b int) int {
 	if a > b {
 		return a
 	}

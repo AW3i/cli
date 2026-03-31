@@ -44,7 +44,7 @@ type Info struct {
 }
 
 // Detect returns the current platform information.
-// On Linux it always reports "ubuntu" (matching current valet-sh behaviour;
+// On Linux it always reports "ubuntu" (matching current valet-sh behavior;
 // Linux Mint remapping is handled inside the Ansible role).
 func Detect() Info {
 	return Info{
@@ -107,7 +107,7 @@ func isExecutable(path string) bool {
 	if err != nil {
 		return false
 	}
-	return info.Mode()&0111 != 0
+	return info.Mode()&0o111 != 0
 }
 
 // NormalizeServiceName applies the fuzzy alias mapping that the Ansible
