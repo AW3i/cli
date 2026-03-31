@@ -40,7 +40,7 @@ instance:
   path: "src"
 `
 	configPath := filepath.Join(tmpDir, ProjectFileName)
-	if err := os.WriteFile(configPath, []byte(configContent), 0o644); err != nil {
+	if err := os.WriteFile(configPath, []byte(configContent), 0644); err != nil {
 		t.Fatalf("Failed to write test config: %v", err)
 	}
 
@@ -77,7 +77,7 @@ func TestLoadProjectNotFound(t *testing.T) {
 func TestLoadProjectInvalidYAML(t *testing.T) {
 	tmpDir := t.TempDir()
 	configPath := filepath.Join(tmpDir, ProjectFileName)
-	os.WriteFile(configPath, []byte("not: valid: yaml: ["), 0o644)
+	os.WriteFile(configPath, []byte("not: valid: yaml: ["), 0644)
 
 	_, err := LoadProject(tmpDir)
 	if err == nil {
@@ -177,10 +177,10 @@ func TestFindProjectRoot(t *testing.T) {
 	// Create a nested directory structure
 	tmpDir := t.TempDir()
 	subDir := filepath.Join(tmpDir, "src", "app", "code")
-	os.MkdirAll(subDir, 0o755)
+	os.MkdirAll(subDir, 0755)
 
 	configContent := "instance:\n  key: test\n  type: magento2\n"
-	os.WriteFile(filepath.Join(tmpDir, ProjectFileName), []byte(configContent), 0o644)
+	os.WriteFile(filepath.Join(tmpDir, ProjectFileName), []byte(configContent), 0644)
 
 	root, cfg, err := FindProjectRoot(subDir)
 	if err != nil {

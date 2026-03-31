@@ -1,0 +1,57 @@
+##
+#   Copyright 2025 TechDivision GmbH
+#
+#   Licensed under the Apache License, Version 2.0 (the "License");
+#   you may not use this file except in compliance with the License.
+#   You may obtain a copy of the License at
+#
+#       http://www.apache.org/licenses/LICENSE-2.0
+#
+#   Unless required by applicable law or agreed to in writing, software
+#   distributed under the License is distributed on an "AS IS" BASIS,
+#   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+#   See the License for the specific language governing permissions and
+#   limitations under the License.
+##
+
+# Codecov configuration for Go CLI coverage reporting
+coverage:
+  status:
+    project:
+      default:
+        target: 60%
+        threshold: 5%
+        base: auto
+        if_no_uploads: error
+        if_not_found: success
+        if_ci_failed: error
+        only_pulls: false
+    patch:
+      default:
+        target: 60%
+        threshold: 5%
+        base: auto
+        if_no_uploads: error
+        if_not_found: success
+        if_ci_failed: error
+        only_pulls: true
+
+# Ignore paths that are hard to test or are thin wrappers
+ignore:
+  - "cmd/**"              # Main entry points
+  - "internal/ansible/**" # Subprocess exec
+  - "**/*_test.go"        # Test files
+  - "**/mock*.go"         # Mock implementations
+
+comment:
+  layout: "reach, diff, flags, files"
+  behavior: default
+  require_changes: true
+  require_base: true
+  require_head: true
+
+flags:
+  go:
+    paths:
+      - cli/
+    carryforward: true

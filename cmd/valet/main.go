@@ -30,7 +30,7 @@ func main() {
 	// Run the periodic update check before dispatching any command.
 	// Skipped on --help / --version / -h invocations so it never interrupts
 	// informational queries.
-	if !isHelpOrVersionCall(os.Args) {
+	if !updater.IsHelpOrVersionCall(os.Args) {
 		updater.Check(Version, os.Args)
 	}
 
@@ -39,18 +39,6 @@ func main() {
 		// cobra already prints the error; just exit non-zero.
 		os.Exit(1)
 	}
-}
-
-// isHelpOrVersionCall returns true when the user is asking for help or
-// version info — cases where an interactive update prompt is unwelcome.
-func isHelpOrVersionCall(args []string) bool {
-	for _, a := range args[1:] {
-		switch a {
-		case "--help", "-h", "--version", "-v", "help":
-			return true
-		}
-	}
-	return false
 }
 
 func newRootCmd() *cobra.Command {
