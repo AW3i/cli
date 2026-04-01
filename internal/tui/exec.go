@@ -38,8 +38,12 @@ const (
 	// viewportMinHeight ensures the log area is always usable.
 	viewportMinHeight = 5
 
-	// execHeaderHeight: command line only (no progress bar placeholder).
-	execHeaderHeight = 1
+	// execHeaderHeight: command line + progress bar line.
+	execHeaderHeight = 2
+
+	// taskLogPrefix is the string that begins a new Ansible task line in the log.
+	// Used to count completed tasks for the progress indicator.
+	taskLogPrefix = "TASK ["
 
 	// execFooterHeight: divider + status/hint line.
 	execFooterHeight = 2
@@ -102,6 +106,14 @@ type ExecModel struct {
 	// logViewer is the full-screen viewport shown when the user chooses
 	// to view the full log after a failure.
 	logViewer viewport.Model
+
+	// tasksDone is the number of Ansible tasks completed so far, counted
+	// by detecting "TASK [" lines in the rolling log output.
+	tasksDone int
+
+	// spinnerFrame is the current index into the spinner animation frames.
+	// Advances on every execTickMsg while the process is running.
+	spinnerFrame int
 
 	// done is true once the subprocess has exited.
 	done bool
@@ -177,6 +189,7 @@ func (e ExecModel) Update(msg tea.Msg) (ExecModel, tea.Cmd) {
 			e.appendLines(lines)
 		}
 		if !e.done {
+			e.spinnerFrame++
 			return e, tickCmd()
 		}
 		return e, nil
@@ -296,7 +309,10 @@ func (e ExecModel) execView() string {
 	}
 	_, _ = fmt.Fprintln(&output, cmdLabel+strings.Repeat(" ", versionPadding)+versionLabel)
 
-	// Live log viewport — no progress bar placeholder, just the output.
+	// Progress bar: spinner + task counter while running, checkmark/cross when done.
+	_, _ = fmt.Fprintln(&output, e.progressBarView())
+
+	// Live log viewport.
 	_, _ = fmt.Fprintln(&output, e.viewport.View())
 
 	// Footer.
@@ -335,6 +351,35 @@ func (e ExecModel) logViewerView() string {
 	return output.String()
 }
 
+// spinnerFrames are the animation frames for the progress spinner.
+// Each frame is displayed for one logPollInterval (100ms).
+var spinnerFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
+
+// progressBarView renders the progress indicator line between the header and
+// the log viewport. While running it shows a spinner + task count. When done
+// it shows a static result indicator.
+//
+// We count tasks rather than showing a 0–100% bar because the total number of
+// tasks is not known before execution completes — a fake percentage would be
+// misleading.
+func (e ExecModel) progressBarView() string {
+	if e.done {
+		if e.err != nil {
+			return lipgloss.NewStyle().Foreground(colourRed).Render(
+				"✘  " + fmt.Sprintf("%d tasks", e.tasksDone),
+			)
+		}
+		return styles.ItemSelected.Render(
+			"✔  " + fmt.Sprintf("%d tasks completed", e.tasksDone),
+		)
+	}
+
+	frame := spinnerFrames[e.spinnerFrame%len(spinnerFrames)]
+	spinner := styles.HelpKey.Render(frame)
+	counter := styles.HelpDesc.Render(fmt.Sprintf("  %d tasks", e.tasksDone))
+	return spinner + counter
+}
+
 // statusLines returns the footer content — one or two lines depending on state.
 func (e ExecModel) statusLines() string {
 	if !e.done {
@@ -365,8 +410,11 @@ func (e ExecModel) IsDone() bool { return e.done }
 // Err returns the subprocess exit error, if any.
 func (e ExecModel) Err() error { return e.err }
 
-// appendLine appends a single line to the live viewport.
+// appendLine appends a single line to the live viewport and counts tasks.
 func (e *ExecModel) appendLine(line string) {
+	if strings.HasPrefix(line, taskLogPrefix) {
+		e.tasksDone++
+	}
 	current := e.viewport.GetContent()
 	if current == "" {
 		e.viewport.SetContent(line)
@@ -376,8 +424,14 @@ func (e *ExecModel) appendLine(line string) {
 	e.viewport.GotoBottom()
 }
 
-// appendLines appends multiple lines to the live viewport in one call.
+// appendLines appends multiple lines to the live viewport in one call,
+// counting tasks as they appear.
 func (e *ExecModel) appendLines(lines []string) {
+	for _, line := range lines {
+		if strings.HasPrefix(line, taskLogPrefix) {
+			e.tasksDone++
+		}
+	}
 	joined := strings.Join(lines, "\n")
 	current := e.viewport.GetContent()
 	if current == "" {
