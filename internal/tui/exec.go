@@ -16,14 +16,11 @@ package tui
 
 import (
 	"bufio"
-	"encoding/base64"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
-	"regexp"
 	"strings"
-	"syscall"
 	"time"
 
 	"charm.land/bubbles/v2/viewport"
@@ -36,36 +33,16 @@ const (
 	logPath = "/usr/local/valet-sh/valet-sh/log/debug.log"
 
 	// logPollInterval is how often we check for new log lines while running.
-	logPollInterval = 50 * time.Millisecond
+	logPollInterval = 100 * time.Millisecond
 
 	// viewportMinHeight ensures the log area is always usable.
 	viewportMinHeight = 5
 
-	// execHeaderHeight: command line + progress bar line.
-	execHeaderHeight = 2
+	// execHeaderHeight: command line + divider + progress placeholder + divider
+	execHeaderHeight = 4
 
-	// taskLogPrefix is the string that begins a new Ansible task line in the log.
-	// Used to count completed tasks for the progress indicator.
-	taskLogPrefix = "TASK ["
-
-	// execFooterHeight: divider + status/hint line.
+	// execFooterHeight: status line + hint line
 	execFooterHeight = 2
-
-	// execFooterHeightPrompt: divider + failure line + prompt line.
-	// Used when awaiting the "View full log?" response so the viewport
-	// does not jump when the prompt appears.
-	execFooterHeightPrompt = 3
-
-	// logViewMaxLines is the maximum number of lines loaded from the log
-	// file when the viewer is opened after a failure. Keeps rendering fast
-	// even for very large log files accumulated over many runs.
-	logViewMaxLines = 10_000
-
-	// logViewHeaderHeight: file path + divider.
-	logViewHeaderHeight = 2
-
-	// logViewFooterHeight: hint line.
-	logViewFooterHeight = 1
 )
 
 // execTickMsg fires periodically to poll the log file for new content.
@@ -77,20 +54,8 @@ type logLineMsg string
 // execDoneMsg is sent when the ansible-playbook process exits.
 type execDoneMsg struct{ err error }
 
-// logViewReadyMsg is sent when tailFile() has finished reading the log.
-// It is delivered via tea.Cmd so the file read never blocks the render loop.
-type logViewReadyMsg struct{ lines []string }
-
-// ansibleTaskMsg carries a task name read from ansible-playbook's stdout.
-// The callback plugin writes "⠙ taskname\r" to stdout for each task start.
-type ansibleTaskMsg string
-
-// ansiEscape matches ANSI escape sequences (colors, cursor control, erase).
-var ansiEscape = regexp.MustCompile(`\x1b\[[0-9;?]*[a-zA-Z]|\x1b\[2K`)
-
 // ExecModel is a Bubble Tea model that shows a scrollable live log panel
-// while an ansible-playbook subprocess is running. On failure it offers
-// to open a full-screen log viewer.
+// while an ansible-playbook subprocess is running.
 //
 // It can be embedded inside the launcher (withSidebar=true) or used
 // standalone as a full-screen panel (withSidebar=false).
@@ -102,58 +67,17 @@ type ExecModel struct {
 	version string
 
 	// withSidebar is true when embedded inside the TUI launcher.
+	// Affects how the viewport width is calculated.
 	withSidebar bool
 
 	// proc is the running ansible-playbook subprocess.
 	proc *exec.Cmd
 
-	// cleanup is a function that deletes temporary files created for the process.
-	// Called in the execDoneMsg handler after the log file is closed.
-	cleanup func()
+	// logFile is the open debug.log handle seeked to EOF before the run starts.
+	logFile *os.File
 
-	// ansibleOut is the reader connected to ansible-playbook's stdout pipe.
-	// The callback plugin writes "⠙ taskname\r" lines here for each task start.
-	// readTaskCmd reads one such segment and sends it as ansibleTaskMsg.
-	ansibleOut io.Reader
-
-	// logFilePath is the path to the debug.log file.
-	logFilePath string
-
-	// logFileInode tracks the inode of the debug.log file.
-	// When the inode changes, it indicates the file has been rotated (Ansible re-opened it).
-	// We reset logFileOffset to 0 to read the new file from the start.
-	logFileInode uint64
-
-	// logFileOffset tracks the current read position in the log file.
-	// A fresh file handle and bufio.Reader are created each tick starting from this offset.
-	// When logFileInode changes (rotation detected), this is reset to 0.
-	logFileOffset int64
-
-	// viewport is the rolling live-log panel shown during execution.
-	viewport viewport.Model
-
-	// logViewer is the full-screen viewport shown when the user chooses
-	// to view the full log after a failure.
-	logViewer viewport.Model
-
-	// tasksDone is the number of Ansible tasks completed so far, counted
-	// by detecting "TASK [" lines in the rolling log output.
-	tasksDone int
-
-	// currentTask is the human-readable name of the task currently being shown.
-	// Extracted from "TASK [role : task name]" lines.
-	// Always shows the most recently discovered task (what Ansible is currently on).
-	currentTask string
-
-	// totalTasks is the total number of tasks that will be executed,
-	// determined by ansible-playbook --list-tasks before the run.
-	// Zero means the count is unknown (e.g. --list-tasks failed), so we
-	// fall back to a simple spinner without a progress bar.
-	totalTasks int
-
-	// spinnerFrame is the current index into the spinner animation frames.
-	// Advances on every execTickMsg while the process is running.
-	spinnerFrame int
+	// viewport displays the rolling log lines.
+	vp viewport.Model
 
 	// done is true once the subprocess has exited.
 	done bool
@@ -161,42 +85,33 @@ type ExecModel struct {
 	// err is non-nil if ansible exited with a non-zero status.
 	err error
 
-	// awaitingLogPrompt is true when we have shown the "View full log? [Y/n]"
-	// prompt and are waiting for the user's answer.
-	awaitingLogPrompt bool
-
-	// logViewOpen is true once the user has said Y and the log viewer is active.
-	logViewOpen bool
-
-	// width/height of the available area.
+	// width/height of the available area (whole terminal for standalone,
+	// right pane width for sidebar-embedded).
 	width  int
 	height int
 }
 
 // NewExecModel creates a new ExecModel ready to run.
 // proc must already be started via ansible.RunSubprocess().
-// cleanup is a function that deletes temporary files (passwords, extra-vars) after the process exits.
-// totalTasks is the total number of tasks (from --list-tasks), or 0 if unknown.
 // width/height are the dimensions of the panel area.
-//
-// Note: the log file is NOT opened here because the Ansible callback plugin
-// rotates debug.log on startup (logger.handlers[0].doRollover()). If we open
-// the file before the subprocess starts, we end up with a handle to the
-// now-rotated debug.log.1, missing all new output. Instead, we open the file
-// lazily in readNewLogLines() after the rotation has already occurred.
-func NewExecModel(command, version string, withSidebar bool, proc *exec.Cmd, ansibleOut io.Reader, cleanup func(), totalTasks, width, height int) ExecModel {
-	viewport := viewport.New(viewport.WithWidth(width), viewport.WithHeight(execViewportHeight(height, false)))
-	viewport.SetContent("")
+func NewExecModel(command, version string, withSidebar bool, proc *exec.Cmd, width, height int) ExecModel {
+	vp := viewport.New(viewport.WithWidth(width), viewport.WithHeight(execViewportHeight(height)))
+	vp.SetContent("")
+
+	// Open the log file and seek to the current end so we only tail lines
+	// written during this run, not historical content.
+	logFile, _ := os.Open(logPath)
+	if logFile != nil {
+		_, _ = logFile.Seek(0, io.SeekEnd)
+	}
 
 	return ExecModel{
 		command:     command,
 		version:     version,
 		withSidebar: withSidebar,
 		proc:        proc,
-		ansibleOut:  ansibleOut,
-		cleanup:     cleanup,
-		viewport:    viewport,
-		totalTasks:  totalTasks,
+		logFile:     logFile,
+		vp:          vp,
 		width:       width,
 		height:      height,
 	}
@@ -206,504 +121,151 @@ func NewExecModel(command, version string, withSidebar bool, proc *exec.Cmd, ans
 func (e ExecModel) SetSize(width, height int) ExecModel {
 	e.width = width
 	e.height = height
-	e.viewport.SetWidth(width)
-	e.viewport.SetHeight(execViewportHeight(height, e.awaitingLogPrompt))
-	if e.logViewOpen {
-		e.logViewer.SetWidth(width)
-		e.logViewer.SetHeight(logViewerViewportHeight(height))
-	}
+	e.vp.SetWidth(width)
+	e.vp.SetHeight(execViewportHeight(height))
 	return e
 }
 
-// Init starts the log poller, the process waiter, and the stdout task reader.
-// The first tick is delayed 300ms to allow Ansible to start, load modules,
-// and rotate the log file before we attempt to open it. Subsequent ticks
-// fire every 50ms.
+// Init starts the log poller and the process waiter.
 func (e ExecModel) Init() tea.Cmd {
 	return tea.Batch(
-		firstTickCmd(), // 300ms delay for first read (after Ansible rotates)
+		tickCmd(),
 		waitForProcess(e.proc),
-		readTaskCmd(e.ansibleOut), // stream task names from ansible stdout
 	)
 }
 
 // Update handles log lines, tick events, process exit, and key presses.
 func (e ExecModel) Update(msg tea.Msg) (ExecModel, tea.Cmd) {
 	switch msg := msg.(type) {
-	case ansibleTaskMsg:
-		// A new task name arrived from ansible's stdout pipe.
-		if string(msg) != "" {
-			e.currentTask = string(msg)
-			// Queue the next read only when we got real data.
-			// Empty msg means EOF (process exited) — stop re-queuing.
-			return e, readTaskCmd(e.ansibleOut)
-		}
-		return e, nil
-
 	case execTickMsg:
+		// Poll log file for new lines.
 		lines := e.readNewLogLines()
 		if len(lines) > 0 {
-			e.appendLines(lines)
+			current := e.vp.GetContent()
+			joined := strings.Join(lines, "\n")
+			if current == "" {
+				e.vp.SetContent(joined)
+			} else {
+				e.vp.SetContent(current + "\n" + joined)
+			}
+			e.vp.GotoBottom()
 		}
 		if !e.done {
-			e.spinnerFrame++
 			return e, tickCmd()
 		}
 		return e, nil
 
 	case logLineMsg:
-		e.appendLine(string(msg))
+		current := e.vp.GetContent()
+		line := string(msg)
+		if current == "" {
+			e.vp.SetContent(line)
+		} else {
+			e.vp.SetContent(current + "\n" + line)
+		}
+		e.vp.GotoBottom()
 		return e, nil
 
 	case execDoneMsg:
-		// Final log drain before marking done.
+		// Do one final log drain before marking done.
 		lines := e.readNewLogLines()
 		if len(lines) > 0 {
-			e.appendLines(lines)
+			current := e.vp.GetContent()
+			joined := strings.Join(lines, "\n")
+			if current == "" {
+				e.vp.SetContent(joined)
+			} else {
+				e.vp.SetContent(current + "\n" + joined)
+			}
+			e.vp.GotoBottom()
 		}
 		e.done = true
 		e.err = msg.err
-		// Clean up temporary files (become password file, extra-vars file).
-		if e.cleanup != nil {
-			e.cleanup()
+		if e.logFile != nil {
+			_ = e.logFile.Close()
+			e.logFile = nil
 		}
-		// In CLI mode (no sidebar): exit immediately on success.
-		if !e.withSidebar && e.err == nil {
-			return e, tea.Quit
-		}
-		// On failure: user must press a key first, then we show the prompt.
-		// Don't resize viewport yet — we'll do that on first keypress if needed.
-		return e, nil
-
-	case logViewReadyMsg:
-		// The log file has been read — open the full-screen viewer.
-		e.logViewer = viewport.New(
-			viewport.WithWidth(e.width),
-			viewport.WithHeight(logViewerViewportHeight(e.height)),
-		)
-		e.logViewer.SoftWrap = true // Enable line wrapping for long lines
-		e.logViewer.SetContent(strings.Join(msg.lines, "\n"))
-		e.logViewer.GotoBottom()
-		e.logViewOpen = true
 		return e, nil
 
 	case tea.KeyPressMsg:
-		return e.handleKey(msg)
+		if e.done {
+			// Any key press after completion exits.
+			return e, tea.Quit
+		}
+		// Pass scroll keys through to viewport while running.
+		var cmd tea.Cmd
+		e.vp, cmd = e.vp.Update(msg)
+		return e, cmd
 
 	case tea.WindowSizeMsg:
 		e = e.SetSize(msg.Width, msg.Height)
 		return e, nil
 	}
 
-	// Route remaining messages to the active viewport.
 	var cmd tea.Cmd
-	if e.logViewOpen {
-		e.logViewer, cmd = e.logViewer.Update(msg)
-	} else {
-		e.viewport, cmd = e.viewport.Update(msg)
-	}
+	e.vp, cmd = e.vp.Update(msg)
 	return e, cmd
 }
 
-// handleKey processes keyboard input for all exec sub-states.
-func (e ExecModel) handleKey(msg tea.KeyPressMsg) (ExecModel, tea.Cmd) {
-	key := msg.String()
-
-	// Log viewer is open — scroll, copy, or quit.
-	if e.logViewOpen {
-		switch key {
-		case "q", "esc", "ctrl+c":
-			return e, tea.Quit
-		case "C":
-			copyToClipboardOSC52(e.logViewer.GetContent())
-			return e, nil
-		}
-		var cmd tea.Cmd
-		e.logViewer, cmd = e.logViewer.Update(msg)
-		return e, cmd
-	}
-
-	// Awaiting Y/n prompt after failure.
-	if e.awaitingLogPrompt {
-		switch key {
-		case "y", "Y", "enter":
-			e.awaitingLogPrompt = false
-			return e, loadLogCmd()
-		case "n", "esc", "q", "ctrl+c":
-			return e, tea.Quit
-		}
-		// Silently ignore all other keys while prompting.
-		return e, nil
-	}
-
-	// Still running — scroll viewport, copy, or handle ctrl+c.
-	if !e.done {
-		if key == "ctrl+c" {
-			// Signal the subprocess to terminate.
-			if e.proc != nil && e.proc.Process != nil {
-				_ = e.proc.Process.Signal(os.Interrupt)
-			}
-			// Clean up temp files immediately (prevent double-call from execDoneMsg).
-			if e.cleanup != nil {
-				e.cleanup()
-				e.cleanup = nil
-			}
-			return e, tea.Quit
-		}
-		if key == "C" {
-			copyToClipboardOSC52(e.viewport.GetContent())
-			return e, nil
-		}
-		var cmd tea.Cmd
-		e.viewport, cmd = e.viewport.Update(msg)
-		return e, cmd
-	}
-
-	// Done with error — show prompt on first key press (unless it's ctrl+c or y/Y), or copy.
-	if e.err != nil && !e.awaitingLogPrompt {
-		if key == "ctrl+c" || key == "esc" || key == "q" {
-			return e, tea.Quit
-		}
-		// If user presses y/Y, skip the prompt and open the log directly.
-		if key == "y" || key == "Y" {
-			return e, loadLogCmd()
-		}
-		// If user presses C, copy the viewport content.
-		if key == "C" {
-			copyToClipboardOSC52(e.viewport.GetContent())
-			return e, nil
-		}
-		// Any other key: show the prompt and wait for response.
-		e.awaitingLogPrompt = true
-		e.viewport.SetHeight(execViewportHeight(e.height, true))
-		return e, nil
-	}
-
-	// Done (success) — C to copy or any other key exits.
-	if key == "C" {
-		copyToClipboardOSC52(e.viewport.GetContent())
-		return e, nil
-	}
-	return e, tea.Quit
-}
-
-// View renders the execution panel or the log viewer.
+// View renders the execution panel.
 func (e ExecModel) View() string {
-	if e.logViewOpen {
-		return e.logViewerView()
-	}
-	if !e.withSidebar {
-		return e.cliView()
-	}
-	return e.execView()
-}
+	var sb strings.Builder
 
-// cliView renders the minimal CLI view: command header, spinner line, and optional error prompt.
-// Used in standalone CLI mode (no sidebar, no viewport of log lines).
-func (e ExecModel) cliView() string {
-	var output strings.Builder
-
-	// Header: command being run + version.
+	// Header: command being run.
 	cmdLabel := styles.Header.Render("▶ valet.sh " + e.command)
-	versionLabel := styles.Version.Render("v" + e.version)
-	versionPadding := e.width - lipgloss.Width(cmdLabel) - lipgloss.Width(versionLabel) - 2
-	if versionPadding < 1 {
-		versionPadding = 1
+	ver := styles.Version.Render("v" + e.version)
+	pad := e.width - lipgloss.Width(cmdLabel) - lipgloss.Width(ver) - 2
+	if pad < 1 {
+		pad = 1
 	}
-	_, _ = fmt.Fprintln(&output, cmdLabel+strings.Repeat(" ", versionPadding)+versionLabel)
+	_, _ = fmt.Fprintln(&sb, cmdLabel+strings.Repeat(" ", pad)+ver)
 
-	// Spinner line: shows current task while running, checkmark/cross when done.
-	_, _ = fmt.Fprintln(&output, e.progressBarView())
+	// Progress bar placeholder (to be implemented).
+	_, _ = fmt.Fprintln(&sb, styles.Divider.Render(strings.Repeat("─", e.width)))
 
-	// On error: show hint or prompt.
-	if e.done && e.err != nil {
-		if e.awaitingLogPrompt {
-			promptLine := styles.HelpDesc.Render("View full log? ") +
-				styles.HelpKey.Render("[Y]") +
-				styles.HelpDesc.Render("/") +
-				styles.ItemDim.Render("n")
-			_, _ = fmt.Fprint(&output, promptLine)
-		} else {
-			hintLine := styles.HelpDesc.Render("(press y to view log, q to exit)")
-			_, _ = fmt.Fprint(&output, hintLine)
-		}
-	}
+	// Log viewport.
+	_, _ = fmt.Fprintln(&sb, e.vp.View())
 
-	return output.String()
+	// Status footer.
+	_, _ = fmt.Fprintln(&sb, styles.Divider.Render(strings.Repeat("─", e.width)))
+	_, _ = fmt.Fprintln(&sb, e.statusLine())
+
+	return sb.String()
 }
 
-// execView renders the live execution panel.
-func (e ExecModel) execView() string {
-	var output strings.Builder
-
-	// Header: command being run + version.
-	cmdLabel := styles.Header.Render("▶ valet.sh " + e.command)
-	versionLabel := styles.Version.Render("v" + e.version)
-	versionPadding := e.width - lipgloss.Width(cmdLabel) - lipgloss.Width(versionLabel) - 2
-	if versionPadding < 1 {
-		versionPadding = 1
-	}
-	_, _ = fmt.Fprintln(&output, cmdLabel+strings.Repeat(" ", versionPadding)+versionLabel)
-
-	// Progress bar: spinner + task counter while running, checkmark/cross when done.
-	_, _ = fmt.Fprintln(&output, e.progressBarView())
-
-	// Log file divider with label.
-	logLabel := styles.ItemDim.Render(" " + logPath + " ")
-	dividerWidth := e.width - lipgloss.Width(logLabel)
-	if dividerWidth < 1 {
-		dividerWidth = 1
-	}
-	_, _ = fmt.Fprintln(&output, styles.Divider.Render(strings.Repeat("─", dividerWidth))+logLabel)
-
-	// Live log viewport.
-	_, _ = fmt.Fprintln(&output, e.viewport.View())
-
-	// Footer with status and error handling.
-	_, _ = fmt.Fprintln(&output, styles.Divider.Render(strings.Repeat("─", e.width)))
-
-	// If done with error, show the prompt or hint like cliView does.
-	if e.done && e.err != nil {
-		if e.awaitingLogPrompt {
-			promptLine := styles.HelpDesc.Render("View full log? ") +
-				styles.HelpKey.Render("[Y]") +
-				styles.HelpDesc.Render("/") +
-				styles.ItemDim.Render("n")
-			_, _ = fmt.Fprint(&output, promptLine)
-		} else {
-			hintLine := styles.HelpDesc.Render("(press y to view log, q to exit)")
-			_, _ = fmt.Fprint(&output, hintLine)
-		}
-	} else {
-		_, _ = fmt.Fprint(&output, e.statusLines())
-	}
-
-	return output.String()
-}
-
-// logViewerView renders the full-screen log file viewer.
-func (e ExecModel) logViewerView() string {
-	var output strings.Builder
-
-	// Header: file path + line count hint.
-	header := styles.Header.Render("▶ " + logPath)
-	hint := styles.Version.Render(fmt.Sprintf("(last %d lines)", logViewMaxLines))
-	versionPadding := e.width - lipgloss.Width(header) - lipgloss.Width(hint) - 2
-	if versionPadding < 1 {
-		versionPadding = 1
-	}
-	_, _ = fmt.Fprintln(&output, header+strings.Repeat(" ", versionPadding)+hint)
-	_, _ = fmt.Fprintln(&output, styles.Divider.Render(strings.Repeat("─", e.width)))
-
-	// Scrollable viewport.
-	_, _ = fmt.Fprintln(&output, e.logViewer.View())
-
-	// Footer hint.
-	_, _ = fmt.Fprintln(&output, styles.Divider.Render(strings.Repeat("─", e.width)))
-	_, _ = fmt.Fprint(&output,
-		styles.HelpKey.Render("↑/↓")+
-			styles.HelpDesc.Render(" scroll   ")+
-			styles.HelpKey.Render("C")+
-			styles.HelpDesc.Render(" copy   ")+
-			styles.HelpKey.Render("q/esc")+
-			styles.HelpDesc.Render(" exit"),
-	)
-
-	return output.String()
-}
-
-// spinnerFrames are the animation frames for the progress spinner.
-// Each frame is displayed for one logPollInterval (100ms).
-// Used as a fallback when totalTasks is unknown.
-var spinnerFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
-
-// progressBarView renders the progress indicator line between the header and
-// the log viewport. Shows a spinner with current task while running, checkmark or
-// cross when done.
-func (e ExecModel) progressBarView() string {
-	if e.done {
-		if e.err != nil {
-			return lipgloss.NewStyle().Foreground(colourRed).Render(
-				"✘  " + fmt.Sprintf("%d tasks", e.tasksDone),
-			)
-		}
-		return styles.ItemSelected.Render(
-			"✔  " + fmt.Sprintf("%d tasks completed", e.tasksDone),
-		)
-	}
-
-	// Always show spinner while running.
-	frame := spinnerFrames[e.spinnerFrame%len(spinnerFrames)]
-	spinner := styles.HelpKey.Render(frame)
-
-	// Show current task if available, otherwise show "running..."
-	taskDisplay := e.currentTask
-	if taskDisplay == "" {
-		taskDisplay = "running..."
-	} else {
-		// Shorten the task name to show only the description part (after | or :)
-		taskDisplay = shortTaskName(taskDisplay)
-	}
-	counter := styles.HelpDesc.Render("  " + taskDisplay)
-	return spinner + counter
-}
-
-// statusLines returns the footer content — one or two lines depending on state.
-func (e ExecModel) statusLines() string {
-	if !e.done {
-		return styles.HelpDesc.Render("⠋ running...   ↑/↓ scroll   C copy")
-	}
-
-	if e.err != nil {
-		failLine := lipgloss.NewStyle().Foreground(colourRed).Bold(true).Render(
-			"✘ failed — see " + logPath,
-		)
-		if e.awaitingLogPrompt {
-			promptLine := styles.HelpDesc.Render("View full log? ") +
-				styles.HelpKey.Render("[Y]") +
-				styles.HelpDesc.Render("/") +
-				styles.ItemDim.Render("n")
-			return failLine + "\n" + promptLine
-		}
-		return failLine + "\n" + styles.HelpDesc.Render("(press y to view log, C to copy, any other key to exit)")
-	}
-
-	return styles.ItemSelected.Render("✔ done") +
-		"   " + styles.HelpDesc.Render("(press C to copy or any key to exit)")
-}
-
-// IsDone returns true once the subprocess has exited.
+// IsDone returns true once the subprocess has exited and the user has not
+// yet dismissed the panel.
 func (e ExecModel) IsDone() bool { return e.done }
 
 // Err returns the subprocess exit error, if any.
 func (e ExecModel) Err() error { return e.err }
 
-// copyToClipboardOSC52 copies the given text to the system clipboard using the
-// OSC 52 escape sequence. This works in modern terminals like iTerm2, Kitty,
-// WezTerm, Alacritty, and tmux (with set-clipboard on). If the terminal doesn't
-// support OSC 52, this is silently ignored.
-//
-// Format: \033]52;c;<base64-encoded-text>\007
-func copyToClipboardOSC52(text string) {
-	encoded := base64.StdEncoding.EncodeToString([]byte(text))
-	oscSeq := "\033]52;c;" + encoded + "\007"
-	_, _ = os.Stdout.WriteString(oscSeq)
-}
-
-// appendLine appends a single line to the live viewport and counts tasks.
-// When a TASK line is found, currentTask is updated to the task name
-// (unless it's a meta-task like include_tasks which should be skipped).
-func (e *ExecModel) appendLine(line string) {
-	if strings.HasPrefix(line, taskLogPrefix) {
-		e.tasksDone++
-		// Extract and display the current task name.
-		// This is the primary source; the ansibleTaskMsg (stdout pipe) is secondary.
-		// Skip meta-tasks (include_tasks, import_tasks, etc.) — they're not real work.
-		if taskName := parseLogTaskName(line); taskName != "" && !isMetaTask(taskName) {
-			e.currentTask = taskName
-		}
+// statusLine returns the status/hint line at the bottom of the panel.
+func (e ExecModel) statusLine() string {
+	if !e.done {
+		return styles.HelpDesc.Render("⠋ running...   ↑/↓ scroll")
 	}
-	current := e.viewport.GetContent()
-	if current == "" {
-		e.viewport.SetContent(line)
-	} else {
-		e.viewport.SetContent(current + "\n" + line)
+	if e.err != nil {
+		errLine := lipgloss.NewStyle().Foreground(colourRed).Bold(true).Render(
+			"✘ failed — see " + logPath,
+		)
+		return errLine + "   " + styles.HelpDesc.Render("(press any key to exit)")
 	}
-	e.viewport.GotoBottom()
-}
-
-// appendLines appends multiple lines to the live viewport in one call,
-// counting tasks as they appear and updating currentTask.
-// Meta-tasks (like include_tasks) are skipped to avoid showing transient control-flow tasks.
-func (e *ExecModel) appendLines(lines []string) {
-	for _, line := range lines {
-		if strings.HasPrefix(line, taskLogPrefix) {
-			e.tasksDone++
-			// Update to the most recent non-meta task in this batch.
-			// Skip include_tasks, import_tasks, etc. — they're not real work.
-			// This ensures currentTask reflects the latest real task found.
-			if taskName := parseLogTaskName(line); taskName != "" && !isMetaTask(taskName) {
-				e.currentTask = taskName
-			}
-		}
-	}
-	joined := strings.Join(lines, "\n")
-	current := e.viewport.GetContent()
-	if current == "" {
-		e.viewport.SetContent(joined)
-	} else {
-		e.viewport.SetContent(current + "\n" + joined)
-	}
-	e.viewport.GotoBottom()
+	doneLine := styles.ItemSelected.Render("✔ done")
+	return doneLine + "   " + styles.HelpDesc.Render("(press any key to exit)")
 }
 
 // readNewLogLines reads any lines appended to the log file since the last read.
-// The log file is re-opened each tick to detect rotation (inode change) and to
-// avoid bufio.Reader internal state caching issues.
-// When Ansible rotates the log, we detect the inode change and reset to offset 0
-// to read the newly-created file from the start.
 func (e *ExecModel) readNewLogLines() []string {
-	// On first call, set the log file path.
-	if e.logFilePath == "" {
-		e.logFilePath = logPath
-	}
-
-	// Open the file fresh on every tick (don't keep a persistent file handle).
-	// This allows us to detect when Ansible rotates the log file (inode change).
-	f, err := os.Open(e.logFilePath)
-	if err != nil {
+	if e.logFile == nil {
 		return nil
 	}
-	defer f.Close()
-
-	// Check the file's inode to detect rotation.
-	stat, err := f.Stat()
-	if err != nil {
-		return nil
-	}
-	currentInode := stat.Sys().(*syscall.Stat_t).Ino
-
-	// If the inode has changed, the file was rotated. Reset offset to 0
-	// to read the newly-created file from the start.
-	if e.logFileInode != 0 && currentInode != e.logFileInode {
-		e.logFileOffset = 0
-	}
-	e.logFileInode = currentInode
-
-	// Seek to the last known position.
-	_, err = f.Seek(e.logFileOffset, io.SeekStart)
-	if err != nil {
-		return nil
-	}
-
-	// Create a fresh buffered reader starting from the current offset.
-	reader := bufio.NewReader(f)
-
 	var lines []string
-	for {
-		line, err := reader.ReadString('\n')
-		// Trim the newline characters but keep the content.
-		line = strings.TrimRight(line, "\r\n")
-		if line != "" {
-			lines = append(lines, line)
-		}
-		if err != nil {
-			// io.EOF or other error — stop reading.
-			// Update offset to resume from here on next tick.
-			pos, _ := f.Seek(0, io.SeekCurrent)
-			e.logFileOffset = pos
-			break
-		}
+	scanner := bufio.NewScanner(e.logFile)
+	for scanner.Scan() {
+		lines = append(lines, scanner.Text())
 	}
 	return lines
-}
-
-// firstTickCmd returns a tea.Cmd that fires after 300ms to allow Ansible
-// to start and rotate the log file before we open it.
-func firstTickCmd() tea.Cmd {
-	return tea.Tick(300*time.Millisecond, func(t time.Time) tea.Msg {
-		return execTickMsg(t)
-	})
 }
 
 // tickCmd returns a tea.Cmd that fires after logPollInterval.
@@ -723,171 +285,9 @@ func waitForProcess(cmd *exec.Cmd) tea.Cmd {
 	}
 }
 
-// readTaskCmd returns a tea.Cmd that blocks reading from r until it gets a
-// real task name from ansible-playbook's stdout, then delivers it as an
-// ansibleTaskMsg. It loops internally so that non-task output (e.g. the
-// FLUSH-only "\x1b[2K\r" line the callback writes before every task, or the
-// play-start "▶ Play Name\n" line) never causes an early return of an empty
-// message.
-//
-// An empty ansibleTaskMsg is only returned when r reaches EOF (the process
-// has exited and the pipe is closed), which signals the Update handler to
-// stop re-queuing this command.
-func readTaskCmd(r io.Reader) tea.Cmd {
-	if r == nil {
-		return nil
-	}
-	return func() tea.Msg {
-		buf := make([]byte, 4096)
-		for {
-			n, err := r.Read(buf)
-			if n > 0 {
-				name := parseAnsibleTaskLine(buf[:n])
-				if name != "" {
-					// Got a real task name — deliver it.
-					return ansibleTaskMsg(name)
-				}
-				// Got data but no task name (FLUSH-only line, play-start line,
-				// etc.) — keep reading rather than delivering an empty message
-				// that would be mistaken for EOF.
-			}
-			if err != nil {
-				// io.EOF or pipe closed: process has exited.
-				return ansibleTaskMsg("")
-			}
-		}
-	}
-}
-
-// spinnerRunes is the set of Unicode braille characters the Ansible callback
-// plugin cycles through as its spinner animation. Only lines whose first rune
-// is one of these are treated as task-name lines.
-var spinnerRunes = map[rune]bool{
-	'⠋': true, '⠙': true, '⠹': true, '⠸': true, '⠼': true,
-	'⠴': true, '⠦': true, '⠧': true, '⠇': true, '⠏': true,
-}
-
-// parseAnsibleTaskLine strips ANSI escape codes from raw bytes, splits on \r,
-// and returns the task name from the last non-empty segment that begins with a
-// known spinner character.
-//
-// The callback writes per task: "\x1b[2K\r\033[0;32m⠙\033[0;0m taskname\r"
-// After stripping ANSI: "⠙ taskname"
-// After trimming spinner + space: "taskname"
-//
-// Lines that do not start with a spinner rune (e.g. the play-start line
-// "▶ Play Name\n" or the FLUSH-only "\r" prefix) are skipped, so they never
-// produce a false task name.
-func parseAnsibleTaskLine(raw []byte) string {
-	// Strip ANSI escape sequences.
-	clean := ansiEscape.ReplaceAllString(string(raw), "")
-	// Split on \r — each segment is one overwritten line.
-	parts := strings.Split(clean, "\r")
-	// Walk backwards to find the last segment that looks like a task line.
-	for i := len(parts) - 1; i >= 0; i-- {
-		seg := strings.TrimSpace(parts[i])
-		if seg == "" {
-			continue
-		}
-		runes := []rune(seg)
-		// Must start with a known spinner rune followed by a space and the task name.
-		if len(runes) > 2 && spinnerRunes[runes[0]] && runes[1] == ' ' {
-			return strings.TrimSpace(string(runes[2:]))
-		}
-		// Not a task line (play-start, FLUSH remnant, etc.) — keep looking.
-	}
-	return ""
-}
-
-// parseLogTaskName extracts the task name from a log line like:
-// "TASK [role-name : task-name] ****..."
-// Only called from appendLine/appendLines after verifying the line starts with "TASK [".
-// Returns the task name part (role-name : task-name) or empty string if no brackets found.
-func parseLogTaskName(line string) string {
-	// Line format: "TASK [role-name : task-name] ****..."
-	// Find opening bracket
-	start := strings.Index(line, "[")
-	if start == -1 {
-		return ""
-	}
-	// Find closing bracket
-	end := strings.Index(line, "]")
-	if end == -1 || end <= start {
-		return ""
-	}
-	// Extract the part between brackets and trim whitespace
-	taskName := strings.TrimSpace(line[start+1 : end])
-	return taskName
-}
-
-// loadLogCmd reads up to logViewMaxLines from the end of the log file
-// and delivers a logViewReadyMsg. Runs inside a tea.Cmd goroutine so the
-// file read never blocks the render loop.
-func loadLogCmd() tea.Cmd {
-	return func() tea.Msg {
-		lines, err := tailFile(logPath, logViewMaxLines)
-		if err != nil {
-			return logViewReadyMsg{lines: []string{
-				"(could not read log: " + err.Error() + ")",
-			}}
-		}
-		return logViewReadyMsg{lines: lines}
-	}
-}
-
-// tailFile reads up to maxLines from the end of the file at path using a
-// ring buffer — single O(n) pass, O(maxLines) memory, no backward seeking.
-func tailFile(path string, maxLines int) ([]string, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		return nil, err
-	}
-	defer func() { _ = f.Close() }()
-
-	ring := make([]string, maxLines)
-	pos, count := 0, 0
-
-	scanner := bufio.NewScanner(f)
-	for scanner.Scan() {
-		ring[pos%maxLines] = scanner.Text()
-		pos++
-		count++
-	}
-	if err := scanner.Err(); err != nil {
-		return nil, err
-	}
-
-	if count <= maxLines {
-		result := make([]string, count)
-		copy(result, ring[:count])
-		return result, nil
-	}
-
-	// Reassemble in chronological order (oldest → newest).
-	start := pos % maxLines
-	result := make([]string, maxLines)
-	copy(result, ring[start:])
-	copy(result[maxLines-start:], ring[:start])
-	return result, nil
-}
-
-// execViewportHeight calculates the live-log viewport height.
-// When awaitingPrompt is true an extra line is reserved for the prompt.
-func execViewportHeight(totalHeight int, awaitingPrompt bool) int {
-	footer := execFooterHeight
-	if awaitingPrompt {
-		footer = execFooterHeightPrompt
-	}
-	h := totalHeight - execHeaderHeight - footer
-	if h < viewportMinHeight {
-		h = viewportMinHeight
-	}
-	return h
-}
-
-// logViewerViewportHeight calculates the log viewer viewport height.
-func logViewerViewportHeight(totalHeight int) int {
-	h := totalHeight - logViewHeaderHeight - logViewFooterHeight
+// execViewportHeight calculates the viewport height from available panel height.
+func execViewportHeight(totalHeight int) int {
+	h := totalHeight - execHeaderHeight - execFooterHeight
 	if h < viewportMinHeight {
 		h = viewportMinHeight
 	}
@@ -895,58 +295,12 @@ func logViewerViewportHeight(totalHeight int) int {
 }
 
 // IsTTY reports whether stdout is connected to a terminal.
+// Used by RunWithPanel to decide whether to show the TUI execution panel
+// or fall back to direct ansible execution for non-interactive environments.
 func IsTTY() bool {
 	fi, err := os.Stdout.Stat()
 	if err != nil {
 		return false
 	}
 	return (fi.Mode() & os.ModeCharDevice) != 0
-}
-
-// isMetaTask returns true if the task name represents an Ansible meta-task
-// that controls flow (include_tasks, import_tasks, etc.) rather than doing real work.
-// These tasks execute instantly and should not be shown as "current task" since
-// the real work happens in the included/imported file.
-func isMetaTask(taskName string) bool {
-	// Extract the task name part (after the last " : " if role-qualified)
-	base := taskName
-	if i := strings.LastIndex(taskName, " : "); i >= 0 {
-		base = taskName[i+3:]
-	}
-
-	// Check if it's a meta-task
-	switch base {
-	case "include_tasks", "import_tasks", "include_role", "import_role":
-		return true
-	}
-	return false
-}
-
-// shortTaskName extracts the meaningful description part of a task name
-// by removing the role prefix and keeping only the task description.
-//
-// Examples:
-//
-//	"valet-init-instance : workflows » magento2 » services » php | ensure php8.3 is started"
-//	→ "ensure php8.3 is started"
-//
-//	"shared-variables : set 'current_os' var"
-//	→ "set 'current_os' var"
-//
-//	"Gathering Facts"
-//	→ "Gathering Facts"
-func shortTaskName(taskName string) string {
-	// If the task has a pipe separator, use what comes after it
-	// (e.g., "role : workflows » ... | task description" → "task description")
-	if i := strings.LastIndex(taskName, " | "); i >= 0 {
-		return strings.TrimSpace(taskName[i+3:])
-	}
-
-	// No pipe — try to strip the role prefix (e.g., "role : task" → "task")
-	if i := strings.Index(taskName, " : "); i >= 0 {
-		return strings.TrimSpace(taskName[i+3:])
-	}
-
-	// No role prefix (e.g., "Gathering Facts" or "set variables")
-	return taskName
 }

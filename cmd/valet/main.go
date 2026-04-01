@@ -37,26 +37,26 @@ func main() {
 
 	root := newRootCmd()
 
-	// When no arguments are given, launch the interactive TUI launcher instead
-	// of printing static help. The TUI returns the selected command + any
-	// arguments filled in by the user. We then inject those into os.Args and
-	// let cobra dispatch normally — no special casing needed further down.
 	if len(os.Args) == 1 {
+		// No arguments — launch the interactive TUI launcher.
+		// The launcher now handles execution internally via the exec panel,
+		// so Run() only returns args in the degenerate case.
 		result, err := tui.Run(root, Version)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "TUI error: %v\n", err)
 			os.Exit(1)
 		}
 		if len(result.Args) == 0 {
-			// User cancelled the TUI.
 			os.Exit(0)
 		}
-		// Prepend binary name and let cobra handle the rest.
+		// Shouldn't reach here in normal flow — guard only.
 		os.Args = append([]string{os.Args[0]}, result.Args...)
 	}
 
-	if err := root.Execute(); err != nil {
-		// cobra already prints the error; just exit non-zero.
+	// Arguments present — show the execution panel on TTY, fall back to
+	// direct cobra/ansible for non-TTY (CI, pipes).
+	if err := tui.RunWithPanel(root, os.Args[1:], Version); err != nil {
+		fmt.Fprintln(os.Stderr, commands.ErrorPrefix(err.Error()))
 		os.Exit(1)
 	}
 }

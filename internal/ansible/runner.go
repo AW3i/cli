@@ -133,6 +133,73 @@ func Run(opts *RunOpts) error {
 	return syscall.Exec(binPath, argv, env)
 }
 
+// RunSubprocess starts ansible-playbook as a child process without replacing
+// the current process image. Unlike Run(), which uses syscall.Exec, this
+// returns a started *exec.Cmd so the caller can wait on it and observe its
+// exit status — used by the TUI execution panel which needs the Go process
+// to stay alive for log tailing and rendering.
+//
+// stdout and stderr are discarded because the Ansible callback plugin writes
+// all output to the log file; the TUI tails that file directly.
+func RunSubprocess(opts *RunOpts) (*exec.Cmd, error) {
+	playbookPath := filepath.Join(platform.RepoDir(), "playbooks", opts.Playbook+".yml")
+	if _, err := os.Stat(playbookPath); err != nil {
+		return nil, fmt.Errorf("playbook not found: %s", playbookPath)
+	}
+
+	workDir := opts.WorkDir
+	if workDir == "" {
+		var err error
+		workDir, err = os.Getwd()
+		if err != nil {
+			return nil, fmt.Errorf("getting working directory: %w", err)
+		}
+	}
+
+	extraVars := ExtraVars{
+		CLI: CLIVars{
+			Args: opts.Args,
+			Opts: opts.Opts,
+		},
+		WorkDir: workDir,
+	}
+	if extraVars.CLI.Args == nil {
+		extraVars.CLI.Args = []string{}
+	}
+	if extraVars.CLI.Opts == nil {
+		extraVars.CLI.Opts = []string{}
+	}
+
+	extraVarsJSON, err := json.Marshal(extraVars)
+	if err != nil {
+		return nil, fmt.Errorf("serializing extra vars: %w", err)
+	}
+
+	ansibleBin := platform.AnsiblePlaybookBin()
+	repoDir := platform.RepoDir()
+
+	args := []string{playbookPath, "-e", string(extraVarsJSON)}
+	if opts.Verbose {
+		args = append(args, "-v")
+	}
+
+	env := os.Environ()
+	env = setEnv(env, "OLDPWD", workDir)
+
+	cmd := exec.Command(ansibleBin, args...)
+	cmd.Dir = repoDir
+	cmd.Env = env
+	// Discard stdout/stderr — all output goes to the log file via the callback.
+	cmd.Stdout = nil
+	cmd.Stderr = nil
+
+	if err = cmd.Start(); err != nil {
+		return nil, fmt.Errorf("starting ansible-playbook: %w", err)
+	}
+
+	return cmd, nil
+}
+
 // setEnv sets or replaces a key in an environ slice (KEY=VALUE format).
 func setEnv(env []string, key, value string) []string {
 	prefix := key + "="
