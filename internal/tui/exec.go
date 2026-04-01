@@ -38,11 +38,27 @@ const (
 	// viewportMinHeight ensures the log area is always usable.
 	viewportMinHeight = 5
 
-	// execHeaderHeight: command line + divider + progress placeholder + divider
-	execHeaderHeight = 4
+	// execHeaderHeight: command line + divider.
+	execHeaderHeight = 2
 
-	// execFooterHeight: status line + hint line
+	// execFooterHeight: divider + status/hint line.
 	execFooterHeight = 2
+
+	// execFooterHeightPrompt: divider + failure line + prompt line.
+	// Used when awaiting the "View full log?" response so the viewport
+	// does not jump when the prompt appears.
+	execFooterHeightPrompt = 3
+
+	// logViewMaxLines is the maximum number of lines loaded from the log
+	// file when the viewer is opened after a failure. Keeps rendering fast
+	// even for very large log files accumulated over many runs.
+	logViewMaxLines = 10_000
+
+	// logViewHeaderHeight: file path + divider.
+	logViewHeaderHeight = 2
+
+	// logViewFooterHeight: hint line.
+	logViewFooterHeight = 1
 )
 
 // execTickMsg fires periodically to poll the log file for new content.
@@ -54,8 +70,13 @@ type logLineMsg string
 // execDoneMsg is sent when the ansible-playbook process exits.
 type execDoneMsg struct{ err error }
 
+// logViewReadyMsg is sent when tailFile() has finished reading the log.
+// It is delivered via tea.Cmd so the file read never blocks the render loop.
+type logViewReadyMsg struct{ lines []string }
+
 // ExecModel is a Bubble Tea model that shows a scrollable live log panel
-// while an ansible-playbook subprocess is running.
+// while an ansible-playbook subprocess is running. On failure it offers
+// to open a full-screen log viewer.
 //
 // It can be embedded inside the launcher (withSidebar=true) or used
 // standalone as a full-screen panel (withSidebar=false).
@@ -67,17 +88,20 @@ type ExecModel struct {
 	version string
 
 	// withSidebar is true when embedded inside the TUI launcher.
-	// Affects how the viewport width is calculated.
 	withSidebar bool
 
 	// proc is the running ansible-playbook subprocess.
 	proc *exec.Cmd
 
-	// logFile is the open debug.log handle seeked to EOF before the run starts.
+	// logFile is the open debug.log handle seeked to EOF before the run.
 	logFile *os.File
 
-	// viewport displays the rolling log lines.
+	// vp is the rolling live-log viewport shown during execution.
 	vp viewport.Model
+
+	// logViewer is the full-screen viewport shown when the user chooses
+	// to view the full log after a failure.
+	logViewer viewport.Model
 
 	// done is true once the subprocess has exited.
 	done bool
@@ -85,8 +109,14 @@ type ExecModel struct {
 	// err is non-nil if ansible exited with a non-zero status.
 	err error
 
-	// width/height of the available area (whole terminal for standalone,
-	// right pane width for sidebar-embedded).
+	// awaitingLogPrompt is true when we have shown the "View full log? [Y/n]"
+	// prompt and are waiting for the user's answer.
+	awaitingLogPrompt bool
+
+	// logViewOpen is true once the user has said Y and the log viewer is active.
+	logViewOpen bool
+
+	// width/height of the available area.
 	width  int
 	height int
 }
@@ -95,7 +125,7 @@ type ExecModel struct {
 // proc must already be started via ansible.RunSubprocess().
 // width/height are the dimensions of the panel area.
 func NewExecModel(command, version string, withSidebar bool, proc *exec.Cmd, width, height int) ExecModel {
-	vp := viewport.New(viewport.WithWidth(width), viewport.WithHeight(execViewportHeight(height)))
+	vp := viewport.New(viewport.WithWidth(width), viewport.WithHeight(execViewportHeight(height, false)))
 	vp.SetContent("")
 
 	// Open the log file and seek to the current end so we only tail lines
@@ -122,7 +152,11 @@ func (e ExecModel) SetSize(width, height int) ExecModel {
 	e.width = width
 	e.height = height
 	e.vp.SetWidth(width)
-	e.vp.SetHeight(execViewportHeight(height))
+	e.vp.SetHeight(execViewportHeight(height, e.awaitingLogPrompt))
+	if e.logViewOpen {
+		e.logViewer.SetWidth(width)
+		e.logViewer.SetHeight(logViewerViewportHeight(height))
+	}
 	return e
 }
 
@@ -138,17 +172,9 @@ func (e ExecModel) Init() tea.Cmd {
 func (e ExecModel) Update(msg tea.Msg) (ExecModel, tea.Cmd) {
 	switch msg := msg.(type) {
 	case execTickMsg:
-		// Poll log file for new lines.
 		lines := e.readNewLogLines()
 		if len(lines) > 0 {
-			current := e.vp.GetContent()
-			joined := strings.Join(lines, "\n")
-			if current == "" {
-				e.vp.SetContent(joined)
-			} else {
-				e.vp.SetContent(current + "\n" + joined)
-			}
-			e.vp.GotoBottom()
+			e.appendLines(lines)
 		}
 		if !e.done {
 			return e, tickCmd()
@@ -156,28 +182,14 @@ func (e ExecModel) Update(msg tea.Msg) (ExecModel, tea.Cmd) {
 		return e, nil
 
 	case logLineMsg:
-		current := e.vp.GetContent()
-		line := string(msg)
-		if current == "" {
-			e.vp.SetContent(line)
-		} else {
-			e.vp.SetContent(current + "\n" + line)
-		}
-		e.vp.GotoBottom()
+		e.appendLine(string(msg))
 		return e, nil
 
 	case execDoneMsg:
-		// Do one final log drain before marking done.
+		// Final log drain before marking done.
 		lines := e.readNewLogLines()
 		if len(lines) > 0 {
-			current := e.vp.GetContent()
-			joined := strings.Join(lines, "\n")
-			if current == "" {
-				e.vp.SetContent(joined)
-			} else {
-				e.vp.SetContent(current + "\n" + joined)
-			}
-			e.vp.GotoBottom()
+			e.appendLines(lines)
 		}
 		e.done = true
 		e.err = msg.err
@@ -185,33 +197,97 @@ func (e ExecModel) Update(msg tea.Msg) (ExecModel, tea.Cmd) {
 			_ = e.logFile.Close()
 			e.logFile = nil
 		}
+		// On failure: show the prompt. Resize viewport to make room.
+		if e.err != nil {
+			e.awaitingLogPrompt = true
+			e.vp.SetHeight(execViewportHeight(e.height, true))
+		}
+		return e, nil
+
+	case logViewReadyMsg:
+		// The log file has been read — open the full-screen viewer.
+		e.logViewer = viewport.New(
+			viewport.WithWidth(e.width),
+			viewport.WithHeight(logViewerViewportHeight(e.height)),
+		)
+		e.logViewer.SetContent(strings.Join(msg.lines, "\n"))
+		e.logViewer.GotoBottom()
+		e.logViewOpen = true
 		return e, nil
 
 	case tea.KeyPressMsg:
-		if e.done {
-			// Any key press after completion exits.
-			return e, tea.Quit
-		}
-		// Pass scroll keys through to viewport while running.
-		var cmd tea.Cmd
-		e.vp, cmd = e.vp.Update(msg)
-		return e, cmd
+		return e.handleKey(msg)
 
 	case tea.WindowSizeMsg:
 		e = e.SetSize(msg.Width, msg.Height)
 		return e, nil
 	}
 
+	// Route remaining messages to the active viewport.
 	var cmd tea.Cmd
-	e.vp, cmd = e.vp.Update(msg)
+	if e.logViewOpen {
+		e.logViewer, cmd = e.logViewer.Update(msg)
+	} else {
+		e.vp, cmd = e.vp.Update(msg)
+	}
 	return e, cmd
 }
 
-// View renders the execution panel.
+// handleKey processes keyboard input for all exec sub-states.
+func (e ExecModel) handleKey(msg tea.KeyPressMsg) (ExecModel, tea.Cmd) {
+	key := msg.String()
+
+	// Log viewer is open — scroll or quit.
+	if e.logViewOpen {
+		switch key {
+		case "q", "esc", "ctrl+c":
+			return e, tea.Quit
+		}
+		var cmd tea.Cmd
+		e.logViewer, cmd = e.logViewer.Update(msg)
+		return e, cmd
+	}
+
+	// Awaiting Y/n prompt after failure.
+	if e.awaitingLogPrompt {
+		switch key {
+		case "y", "enter":
+			e.awaitingLogPrompt = false
+			return e, loadLogCmd()
+		case "n", "esc", "q", "ctrl+c":
+			return e, tea.Quit
+		}
+		// Silently ignore all other keys while prompting.
+		return e, nil
+	}
+
+	// Still running — scroll viewport or handle ctrl+c.
+	if !e.done {
+		if key == "ctrl+c" {
+			return e, tea.Quit
+		}
+		var cmd tea.Cmd
+		e.vp, cmd = e.vp.Update(msg)
+		return e, cmd
+	}
+
+	// Done (success) — any key exits.
+	return e, tea.Quit
+}
+
+// View renders the execution panel or the log viewer.
 func (e ExecModel) View() string {
+	if e.logViewOpen {
+		return e.logViewerView()
+	}
+	return e.execView()
+}
+
+// execView renders the live execution panel.
+func (e ExecModel) execView() string {
 	var sb strings.Builder
 
-	// Header: command being run.
+	// Header: command being run + version.
 	cmdLabel := styles.Header.Render("▶ valet.sh " + e.command)
 	ver := styles.Version.Render("v" + e.version)
 	pad := e.width - lipgloss.Width(cmdLabel) - lipgloss.Width(ver) - 2
@@ -219,40 +295,98 @@ func (e ExecModel) View() string {
 		pad = 1
 	}
 	_, _ = fmt.Fprintln(&sb, cmdLabel+strings.Repeat(" ", pad)+ver)
-
-	// Progress bar placeholder (to be implemented).
 	_, _ = fmt.Fprintln(&sb, styles.Divider.Render(strings.Repeat("─", e.width)))
 
-	// Log viewport.
+	// Live log viewport.
 	_, _ = fmt.Fprintln(&sb, e.vp.View())
 
-	// Status footer.
+	// Footer.
 	_, _ = fmt.Fprintln(&sb, styles.Divider.Render(strings.Repeat("─", e.width)))
-	_, _ = fmt.Fprintln(&sb, e.statusLine())
+	_, _ = fmt.Fprint(&sb, e.statusLines())
 
 	return sb.String()
 }
 
-// IsDone returns true once the subprocess has exited and the user has not
-// yet dismissed the panel.
+// logViewerView renders the full-screen log file viewer.
+func (e ExecModel) logViewerView() string {
+	var sb strings.Builder
+
+	// Header: file path + line count hint.
+	header := styles.Header.Render("▶ " + logPath)
+	hint := styles.Version.Render(fmt.Sprintf("(last %d lines)", logViewMaxLines))
+	pad := e.width - lipgloss.Width(header) - lipgloss.Width(hint) - 2
+	if pad < 1 {
+		pad = 1
+	}
+	_, _ = fmt.Fprintln(&sb, header+strings.Repeat(" ", pad)+hint)
+	_, _ = fmt.Fprintln(&sb, styles.Divider.Render(strings.Repeat("─", e.width)))
+
+	// Scrollable viewport.
+	_, _ = fmt.Fprintln(&sb, e.logViewer.View())
+
+	// Footer hint.
+	_, _ = fmt.Fprintln(&sb, styles.Divider.Render(strings.Repeat("─", e.width)))
+	_, _ = fmt.Fprint(&sb,
+		styles.HelpKey.Render("↑/↓")+
+			styles.HelpDesc.Render(" scroll   ")+
+			styles.HelpKey.Render("q/esc")+
+			styles.HelpDesc.Render(" exit"),
+	)
+
+	return sb.String()
+}
+
+// statusLines returns the footer content — one or two lines depending on state.
+func (e ExecModel) statusLines() string {
+	if !e.done {
+		return styles.HelpDesc.Render("⠋ running...   ↑/↓ scroll")
+	}
+
+	if e.err != nil {
+		failLine := lipgloss.NewStyle().Foreground(colourRed).Bold(true).Render(
+			"✘ failed — see " + logPath,
+		)
+		if e.awaitingLogPrompt {
+			promptLine := styles.HelpDesc.Render("View full log? ") +
+				styles.HelpKey.Render("[Y]") +
+				styles.HelpDesc.Render("/") +
+				styles.ItemDim.Render("n")
+			return failLine + "\n" + promptLine
+		}
+		return failLine + "\n" + styles.HelpDesc.Render("(press any key to exit)")
+	}
+
+	return styles.ItemSelected.Render("✔ done") +
+		"   " + styles.HelpDesc.Render("(press any key to exit)")
+}
+
+// IsDone returns true once the subprocess has exited.
 func (e ExecModel) IsDone() bool { return e.done }
 
 // Err returns the subprocess exit error, if any.
 func (e ExecModel) Err() error { return e.err }
 
-// statusLine returns the status/hint line at the bottom of the panel.
-func (e ExecModel) statusLine() string {
-	if !e.done {
-		return styles.HelpDesc.Render("⠋ running...   ↑/↓ scroll")
+// appendLine appends a single line to the live viewport.
+func (e *ExecModel) appendLine(line string) {
+	current := e.vp.GetContent()
+	if current == "" {
+		e.vp.SetContent(line)
+	} else {
+		e.vp.SetContent(current + "\n" + line)
 	}
-	if e.err != nil {
-		errLine := lipgloss.NewStyle().Foreground(colourRed).Bold(true).Render(
-			"✘ failed — see " + logPath,
-		)
-		return errLine + "   " + styles.HelpDesc.Render("(press any key to exit)")
+	e.vp.GotoBottom()
+}
+
+// appendLines appends multiple lines to the live viewport in one call.
+func (e *ExecModel) appendLines(lines []string) {
+	joined := strings.Join(lines, "\n")
+	current := e.vp.GetContent()
+	if current == "" {
+		e.vp.SetContent(joined)
+	} else {
+		e.vp.SetContent(current + "\n" + joined)
 	}
-	doneLine := styles.ItemSelected.Render("✔ done")
-	return doneLine + "   " + styles.HelpDesc.Render("(press any key to exit)")
+	e.vp.GotoBottom()
 }
 
 // readNewLogLines reads any lines appended to the log file since the last read.
@@ -285,9 +419,74 @@ func waitForProcess(cmd *exec.Cmd) tea.Cmd {
 	}
 }
 
-// execViewportHeight calculates the viewport height from available panel height.
-func execViewportHeight(totalHeight int) int {
-	h := totalHeight - execHeaderHeight - execFooterHeight
+// loadLogCmd reads up to logViewMaxLines from the end of the log file
+// and delivers a logViewReadyMsg. Runs inside a tea.Cmd goroutine so the
+// file read never blocks the render loop.
+func loadLogCmd() tea.Cmd {
+	return func() tea.Msg {
+		lines, err := tailFile(logPath, logViewMaxLines)
+		if err != nil {
+			return logViewReadyMsg{lines: []string{
+				"(could not read log: " + err.Error() + ")",
+			}}
+		}
+		return logViewReadyMsg{lines: lines}
+	}
+}
+
+// tailFile reads up to maxLines from the end of the file at path using a
+// ring buffer — single O(n) pass, O(maxLines) memory, no backward seeking.
+func tailFile(path string, maxLines int) ([]string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = f.Close() }()
+
+	ring := make([]string, maxLines)
+	pos, count := 0, 0
+
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		ring[pos%maxLines] = scanner.Text()
+		pos++
+		count++
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, err
+	}
+
+	if count <= maxLines {
+		result := make([]string, count)
+		copy(result, ring[:count])
+		return result, nil
+	}
+
+	// Reassemble in chronological order (oldest → newest).
+	start := pos % maxLines
+	result := make([]string, maxLines)
+	copy(result, ring[start:])
+	copy(result[maxLines-start:], ring[:start])
+	return result, nil
+}
+
+// execViewportHeight calculates the live-log viewport height.
+// When awaitingPrompt is true an extra line is reserved for the prompt.
+func execViewportHeight(totalHeight int, awaitingPrompt bool) int {
+	footer := execFooterHeight
+	if awaitingPrompt {
+		footer = execFooterHeightPrompt
+	}
+	h := totalHeight - execHeaderHeight - footer
+	if h < viewportMinHeight {
+		h = viewportMinHeight
+	}
+	return h
+}
+
+// logViewerViewportHeight calculates the log viewer viewport height.
+func logViewerViewportHeight(totalHeight int) int {
+	h := totalHeight - logViewHeaderHeight - logViewFooterHeight
 	if h < viewportMinHeight {
 		h = viewportMinHeight
 	}
@@ -295,8 +494,6 @@ func execViewportHeight(totalHeight int) int {
 }
 
 // IsTTY reports whether stdout is connected to a terminal.
-// Used by RunWithPanel to decide whether to show the TUI execution panel
-// or fall back to direct ansible execution for non-interactive environments.
 func IsTTY() bool {
 	fi, err := os.Stdout.Stat()
 	if err != nil {
