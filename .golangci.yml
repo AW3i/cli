@@ -118,8 +118,13 @@ issues:
     - text: "G107"
       linters:
         - gosec
-    # Security: syscall.Exec is intentional and documented  
+    # Security: syscall.Exec is intentional and documented
     - text: "G204"
+      linters:
+        - gosec
+    # tailFile always receives the hardcoded logPath constant — not a user input
+    - text: "G304"
+      path: internal/tui/exec.go
       linters:
         - gosec
     # Intentional blank assignments for best-effort operations
