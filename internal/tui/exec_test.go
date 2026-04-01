@@ -199,7 +199,7 @@ func TestExecModelLogLineAppended(t *testing.T) {
 
 	rm, _ := m.Update(logLineMsg("TASK [install] ok"))
 
-	content := rm.vp.GetContent()
+	content := rm.viewport.GetContent()
 	if content != "TASK [install] ok" {
 		t.Errorf("expected log line in viewport, got %q", content)
 	}
@@ -211,7 +211,7 @@ func TestExecModelMultipleLogLines(t *testing.T) {
 	m2, _ := m.Update(logLineMsg("line 1"))
 	m3, _ := m2.Update(logLineMsg("line 2"))
 
-	content := m3.vp.GetContent()
+	content := m3.viewport.GetContent()
 	if content != "line 1\nline 2" {
 		t.Errorf("expected two lines, got %q", content)
 	}

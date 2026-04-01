@@ -62,7 +62,7 @@ func RunWithPanel(root *cobra.Command, args []string, version string) error {
 // panel for the given proc. Called for direct CLI invocations (no sidebar).
 func runExecPanel(command, version string, proc *exec.Cmd) error {
 	m := standaloneExecModel{
-		exec: NewExecModel(command, version, false, proc, 80, 24),
+		execPanel: NewExecModel(command, version, false, proc, 80, 24),
 	}
 
 	p := tea.NewProgram(m)
@@ -72,7 +72,7 @@ func runExecPanel(command, version string, proc *exec.Cmd) error {
 	}
 
 	if fm, ok := final.(standaloneExecModel); ok {
-		return fm.exec.Err()
+		return fm.execPanel.Err()
 	}
 	return nil
 }
@@ -80,21 +80,21 @@ func runExecPanel(command, version string, proc *exec.Cmd) error {
 // standaloneExecModel wraps ExecModel as a full standalone Bubble Tea program.
 // Used for direct CLI invocations (no launcher sidebar).
 type standaloneExecModel struct {
-	exec ExecModel
+	execPanel ExecModel
 }
 
-func (s standaloneExecModel) Init() tea.Cmd {
-	return s.exec.Init()
+func (standalone standaloneExecModel) Init() tea.Cmd {
+	return standalone.execPanel.Init()
 }
 
-func (s standaloneExecModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+func (standalone standaloneExecModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmd tea.Cmd
-	s.exec, cmd = s.exec.Update(msg)
-	return s, cmd
+	standalone.execPanel, cmd = standalone.execPanel.Update(msg)
+	return standalone, cmd
 }
 
-func (s standaloneExecModel) View() tea.View {
-	v := tea.NewView(s.exec.View())
+func (standalone standaloneExecModel) View() tea.View {
+	v := tea.NewView(standalone.execPanel.View())
 	v.AltScreen = true
 	return v
 }

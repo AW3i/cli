@@ -96,8 +96,8 @@ type ExecModel struct {
 	// logFile is the open debug.log handle seeked to EOF before the run.
 	logFile *os.File
 
-	// vp is the rolling live-log viewport shown during execution.
-	vp viewport.Model
+	// viewport is the rolling live-log panel shown during execution.
+	viewport viewport.Model
 
 	// logViewer is the full-screen viewport shown when the user chooses
 	// to view the full log after a failure.
@@ -125,8 +125,8 @@ type ExecModel struct {
 // proc must already be started via ansible.RunSubprocess().
 // width/height are the dimensions of the panel area.
 func NewExecModel(command, version string, withSidebar bool, proc *exec.Cmd, width, height int) ExecModel {
-	vp := viewport.New(viewport.WithWidth(width), viewport.WithHeight(execViewportHeight(height, false)))
-	vp.SetContent("")
+	viewport := viewport.New(viewport.WithWidth(width), viewport.WithHeight(execViewportHeight(height, false)))
+	viewport.SetContent("")
 
 	// Open the log file and seek to the current end so we only tail lines
 	// written during this run, not historical content.
@@ -141,7 +141,7 @@ func NewExecModel(command, version string, withSidebar bool, proc *exec.Cmd, wid
 		withSidebar: withSidebar,
 		proc:        proc,
 		logFile:     logFile,
-		vp:          vp,
+		viewport:    viewport,
 		width:       width,
 		height:      height,
 	}
@@ -151,8 +151,8 @@ func NewExecModel(command, version string, withSidebar bool, proc *exec.Cmd, wid
 func (e ExecModel) SetSize(width, height int) ExecModel {
 	e.width = width
 	e.height = height
-	e.vp.SetWidth(width)
-	e.vp.SetHeight(execViewportHeight(height, e.awaitingLogPrompt))
+	e.viewport.SetWidth(width)
+	e.viewport.SetHeight(execViewportHeight(height, e.awaitingLogPrompt))
 	if e.logViewOpen {
 		e.logViewer.SetWidth(width)
 		e.logViewer.SetHeight(logViewerViewportHeight(height))
@@ -200,7 +200,7 @@ func (e ExecModel) Update(msg tea.Msg) (ExecModel, tea.Cmd) {
 		// On failure: show the prompt. Resize viewport to make room.
 		if e.err != nil {
 			e.awaitingLogPrompt = true
-			e.vp.SetHeight(execViewportHeight(e.height, true))
+			e.viewport.SetHeight(execViewportHeight(e.height, true))
 		}
 		return e, nil
 
@@ -228,7 +228,7 @@ func (e ExecModel) Update(msg tea.Msg) (ExecModel, tea.Cmd) {
 	if e.logViewOpen {
 		e.logViewer, cmd = e.logViewer.Update(msg)
 	} else {
-		e.vp, cmd = e.vp.Update(msg)
+		e.viewport, cmd = e.viewport.Update(msg)
 	}
 	return e, cmd
 }
@@ -267,7 +267,7 @@ func (e ExecModel) handleKey(msg tea.KeyPressMsg) (ExecModel, tea.Cmd) {
 			return e, tea.Quit
 		}
 		var cmd tea.Cmd
-		e.vp, cmd = e.vp.Update(msg)
+		e.viewport, cmd = e.viewport.Update(msg)
 		return e, cmd
 	}
 
@@ -285,55 +285,55 @@ func (e ExecModel) View() string {
 
 // execView renders the live execution panel.
 func (e ExecModel) execView() string {
-	var sb strings.Builder
+	var output strings.Builder
 
 	// Header: command being run + version.
 	cmdLabel := styles.Header.Render("▶ valet.sh " + e.command)
-	ver := styles.Version.Render("v" + e.version)
-	pad := e.width - lipgloss.Width(cmdLabel) - lipgloss.Width(ver) - 2
-	if pad < 1 {
-		pad = 1
+	versionLabel := styles.Version.Render("v" + e.version)
+	versionPadding := e.width - lipgloss.Width(cmdLabel) - lipgloss.Width(versionLabel) - 2
+	if versionPadding < 1 {
+		versionPadding = 1
 	}
-	_, _ = fmt.Fprintln(&sb, cmdLabel+strings.Repeat(" ", pad)+ver)
-	_, _ = fmt.Fprintln(&sb, styles.Divider.Render(strings.Repeat("─", e.width)))
+	_, _ = fmt.Fprintln(&output, cmdLabel+strings.Repeat(" ", versionPadding)+versionLabel)
+	_, _ = fmt.Fprintln(&output, styles.Divider.Render(strings.Repeat("─", e.width)))
 
 	// Live log viewport.
-	_, _ = fmt.Fprintln(&sb, e.vp.View())
+	_, _ = fmt.Fprintln(&output, e.viewport.View())
 
 	// Footer.
-	_, _ = fmt.Fprintln(&sb, styles.Divider.Render(strings.Repeat("─", e.width)))
-	_, _ = fmt.Fprint(&sb, e.statusLines())
+	_, _ = fmt.Fprintln(&output, styles.Divider.Render(strings.Repeat("─", e.width)))
+	_, _ = fmt.Fprint(&output, e.statusLines())
 
-	return sb.String()
+	return output.String()
 }
 
 // logViewerView renders the full-screen log file viewer.
 func (e ExecModel) logViewerView() string {
-	var sb strings.Builder
+	var output strings.Builder
 
 	// Header: file path + line count hint.
 	header := styles.Header.Render("▶ " + logPath)
 	hint := styles.Version.Render(fmt.Sprintf("(last %d lines)", logViewMaxLines))
-	pad := e.width - lipgloss.Width(header) - lipgloss.Width(hint) - 2
-	if pad < 1 {
-		pad = 1
+	versionPadding := e.width - lipgloss.Width(header) - lipgloss.Width(hint) - 2
+	if versionPadding < 1 {
+		versionPadding = 1
 	}
-	_, _ = fmt.Fprintln(&sb, header+strings.Repeat(" ", pad)+hint)
-	_, _ = fmt.Fprintln(&sb, styles.Divider.Render(strings.Repeat("─", e.width)))
+	_, _ = fmt.Fprintln(&output, header+strings.Repeat(" ", versionPadding)+hint)
+	_, _ = fmt.Fprintln(&output, styles.Divider.Render(strings.Repeat("─", e.width)))
 
 	// Scrollable viewport.
-	_, _ = fmt.Fprintln(&sb, e.logViewer.View())
+	_, _ = fmt.Fprintln(&output, e.logViewer.View())
 
 	// Footer hint.
-	_, _ = fmt.Fprintln(&sb, styles.Divider.Render(strings.Repeat("─", e.width)))
-	_, _ = fmt.Fprint(&sb,
+	_, _ = fmt.Fprintln(&output, styles.Divider.Render(strings.Repeat("─", e.width)))
+	_, _ = fmt.Fprint(&output,
 		styles.HelpKey.Render("↑/↓")+
 			styles.HelpDesc.Render(" scroll   ")+
 			styles.HelpKey.Render("q/esc")+
 			styles.HelpDesc.Render(" exit"),
 	)
 
-	return sb.String()
+	return output.String()
 }
 
 // statusLines returns the footer content — one or two lines depending on state.
@@ -368,25 +368,25 @@ func (e ExecModel) Err() error { return e.err }
 
 // appendLine appends a single line to the live viewport.
 func (e *ExecModel) appendLine(line string) {
-	current := e.vp.GetContent()
+	current := e.viewport.GetContent()
 	if current == "" {
-		e.vp.SetContent(line)
+		e.viewport.SetContent(line)
 	} else {
-		e.vp.SetContent(current + "\n" + line)
+		e.viewport.SetContent(current + "\n" + line)
 	}
-	e.vp.GotoBottom()
+	e.viewport.GotoBottom()
 }
 
 // appendLines appends multiple lines to the live viewport in one call.
 func (e *ExecModel) appendLines(lines []string) {
 	joined := strings.Join(lines, "\n")
-	current := e.vp.GetContent()
+	current := e.viewport.GetContent()
 	if current == "" {
-		e.vp.SetContent(joined)
+		e.viewport.SetContent(joined)
 	} else {
-		e.vp.SetContent(current + "\n" + joined)
+		e.viewport.SetContent(current + "\n" + joined)
 	}
-	e.vp.GotoBottom()
+	e.viewport.GotoBottom()
 }
 
 // readNewLogLines reads any lines appended to the log file since the last read.
