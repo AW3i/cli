@@ -138,13 +138,19 @@ func (b InlineBox) Update(msg tea.Msg) (InlineBox, tea.Cmd) {
 	return b, cmd
 }
 
+// InputView returns the rendered textinput for embedding in the header.
+// The input itself is not shown inside the box — it lives in the header line.
+func (b InlineBox) InputView() string {
+	return b.input.View()
+}
+
 // View renders the inline box as a bordered string ready to embed in the layout.
+// The box contains docs only — the input is shown in the header line.
 func (b InlineBox) View() string {
 	innerWidth := b.width - 2*inlineBoxPaddingH - 2
 
-	// Input line + blank separator, followed by visible doc lines.
-	contentLines := []string{b.input.View(), ""}
-	contentLines = append(contentLines, b.visibleDocLines()...)
+	// Docs only — no input line in the box.
+	contentLines := b.visibleDocLines()
 
 	// Scroll hint if there are more lines below.
 	totalLines := len(b.docsLines)
