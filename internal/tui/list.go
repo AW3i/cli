@@ -49,7 +49,7 @@ func (i CommandItem) Description() string {
 
 func (i CommandItem) FilterValue() string { return i.Title() }
 
-// LongDescription returns the full description to show in the right pane.
+// LongDescription returns the full description to show in the inline box.
 func (i CommandItem) LongDescription() string {
 	if i.IsBack {
 		return "Return to the previous menu"
@@ -69,8 +69,7 @@ func (i CommandItem) HasSubCommands() bool {
 	return i.Cmd.HasAvailableSubCommands()
 }
 
-// Args returns the cobra flag definitions for commands that need arguments,
-// presented as a slice of ArgDef for the argument input pane.
+// Args returns the cobra flag definitions for commands that need arguments.
 func (i CommandItem) Args() []ArgDef {
 	if i.IsBack || i.Cmd == nil {
 		return nil
@@ -89,12 +88,11 @@ type ArgDef struct {
 func argsFromUse(use string) []ArgDef {
 	parts := strings.Fields(use)
 	if len(parts) <= 1 {
-		return nil // no args in Use string
+		return nil
 	}
 
 	var defs []ArgDef
 	for _, part := range parts[1:] {
-		// Skip variadic markers like [args...]
 		if strings.HasSuffix(part, "...]") || strings.HasSuffix(part, "...>") {
 			continue
 		}
@@ -128,57 +126,149 @@ func itemsFromCommands(cmds []*cobra.Command, withBack bool) []list.Item {
 	return items
 }
 
-// CommandDelegate is a custom list delegate that renders command items
-// using the valet-sh colour palette.
+// CommandDelegate is a custom list delegate — kept for compatibility with
+// bubbles/list internals. The horizontal command bar uses renderHorizontalList()
+// for display instead of commandList.View().
 type CommandDelegate struct {
 	list.DefaultDelegate
 }
 
-// NewCommandDelegate creates a delegate styled to match valet-sh's visual language.
+// NewCommandDelegate creates a minimal delegate — spacing 0, single line.
+// Styles are not used for display (renderHorizontalList handles rendering)
+// but must be set so bubbles/list does not panic on internal calls.
 func NewCommandDelegate() CommandDelegate {
 	d := list.NewDefaultDelegate()
-
-	// Single line — description shown in the right pane instead.
 	d.ShowDescription = false
 	d.SetHeight(1)
+	d.SetSpacing(0)
 
-	// Selected item: green + bold, matching the Ansible callback play_start colour.
 	d.Styles.SelectedTitle = lipgloss.NewStyle().
 		Bold(true).
 		Foreground(colourGreen).
-		PaddingLeft(2)
+		PaddingLeft(1)
 
-	// Unselected item: normal text.
 	d.Styles.NormalTitle = lipgloss.NewStyle().
 		Foreground(colourText).
-		PaddingLeft(2)
+		PaddingLeft(1)
 
-	// Dim item (filtered out).
 	d.Styles.DimmedTitle = lipgloss.NewStyle().
 		Foreground(colourDim).
-		PaddingLeft(2)
+		PaddingLeft(1)
 
-	// Remove the border on selected item (we use colour only).
 	d.Styles.SelectedTitle = d.Styles.SelectedTitle.BorderLeft(false)
 
 	return CommandDelegate{DefaultDelegate: d}
 }
 
+// renderHorizontalList renders the visible items from commandList as a
+// single scrollable horizontal row:
+//
+//	← install · init · ▶ init-instance · service · link →
+//
+// The selected item is highlighted in green with a ▶ prefix.
+// Scroll arrows (← ▷) appear at the edges when items are off-screen.
+// The rendered string is guaranteed to fit within maxWidth characters.
+func renderHorizontalList(commandList list.Model, maxWidth int) string {
+	items := commandList.VisibleItems()
+	if len(items) == 0 {
+		return ""
+	}
+
+	selectedIdx := commandList.Index()
+	sep := styles.CommandSeparator.Render(" · ")
+
+	// Build all item labels.
+	labels := make([]string, len(items))
+	for i, item := range items {
+		cmd, ok := item.(CommandItem)
+		if !ok {
+			continue
+		}
+		if i == selectedIdx {
+			labels[i] = styles.CommandSelected.Render("▶ " + cmd.Title())
+		} else {
+			labels[i] = styles.CommandNormal.Render(cmd.Title())
+		}
+	}
+
+	// Build a window of items around the selected index that fits in maxWidth.
+	// Reserve space for the scroll indicators (2 chars each side).
+	const scrollIndicatorWidth = 2
+	available := maxWidth - scrollIndicatorWidth*2
+
+	// Start with just the selected item and expand outward.
+	start := selectedIdx
+	end := selectedIdx + 1
+
+	current := lipgloss.Width(labels[selectedIdx])
+
+	// Expand rightward.
+	for end < len(labels) {
+		next := lipgloss.Width(sep) + lipgloss.Width(labels[end])
+		if current+next > available {
+			break
+		}
+		current += next
+		end++
+	}
+
+	// Expand leftward.
+	for start > 0 {
+		prev := lipgloss.Width(labels[start-1]) + lipgloss.Width(sep)
+		if current+prev > available {
+			break
+		}
+		current += prev
+		start--
+	}
+
+	// Assemble the visible segment.
+	var parts []string
+	for i := start; i < end; i++ {
+		parts = append(parts, labels[i])
+	}
+	row := strings.Join(parts, sep)
+
+	// Add scroll indicators.
+	leftHint := "  "
+	rightHint := "  "
+	if start > 0 {
+		leftHint = styles.CommandScrollHint.Render("← ")
+	}
+	if end < len(labels) {
+		rightHint = styles.CommandScrollHint.Render(" →")
+	}
+
+	return leftHint + row + rightHint
+}
+
 // renderHelpBar renders the keybinding hint line at the bottom of the TUI.
-func renderHelpBar(width int) string {
-	bindings := []struct{ key, desc string }{
-		{"↑/↓", "navigate"},
-		{"type to search", ""},
-		{"↵", "select"},
-		{"esc", "back"},
-		{"q", "quit"},
-		{"ctrl+c", "force quit"},
+func renderHelpBar(vimMode bool, width int) string {
+	var bindings []struct{ key, desc string }
+
+	if vimMode {
+		bindings = []struct{ key, desc string }{
+			{"h/l", "navigate"},
+			{"type to search", ""},
+			{"↵", "select"},
+			{"esc", "back"},
+			{"q", "quit"},
+			{"ctrl+[", "normal mode"},
+		}
+	} else {
+		bindings = []struct{ key, desc string }{
+			{"←/→", "navigate"},
+			{"type to search", ""},
+			{"↵", "select"},
+			{"esc", "back"},
+			{"q", "quit"},
+			{"ctrl+[", "vim mode"},
+		}
 	}
 
 	parts := make([]string, 0, len(bindings)*2)
 	for i, b := range bindings {
 		if b.desc == "" {
-			// Self-describing hint — render key only, no trailing desc space.
 			parts = append(parts, styles.HelpKey.Render(b.key))
 		} else {
 			parts = append(parts,
@@ -192,7 +282,29 @@ func renderHelpBar(width int) string {
 	}
 
 	bar := strings.Join(parts, " ")
-	// width is reserved for future centred rendering
-	_ = width
+	_ = width // reserved for future centred rendering
 	return bar
+}
+
+// renderInlineHelpBar renders the help line shown while the inline box is open.
+func renderInlineHelpBar(width int) string {
+	bindings := []struct{ key, desc string }{
+		{"↵", "run"},
+		{"ctrl+d/u", "scroll docs"},
+		{"esc", "back"},
+	}
+
+	parts := make([]string, 0, len(bindings)*2)
+	for i, b := range bindings {
+		parts = append(parts,
+			styles.HelpKey.Render(b.key),
+			styles.HelpDesc.Render(" "+b.desc),
+		)
+		if i < len(bindings)-1 {
+			parts = append(parts, styles.HelpSep.Render(" · "))
+		}
+	}
+
+	_ = width
+	return strings.Join(parts, " ")
 }

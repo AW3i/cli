@@ -21,78 +21,122 @@ import (
 	"charm.land/lipgloss/v2"
 )
 
-// Colour palette — mirrors the ANSI codes used by the Python Ansible callback
-// plugin and internal/commands/help.go so the TUI feels visually consistent.
+// Colour palette — uses terminal palette indices (0–15) so the TUI adapts
+// to the user's terminal theme (Solarized, Dracula, Nord, etc.) rather than
+// hardcoding hex values that may clash.
 var (
-	colourBlue  = lipgloss.Color("#1E90FF") // matches ansiBlue  \033[1;34m
-	colourGreen = lipgloss.Color("#00CC00") // matches ansiGreen \033[0;32m
-	colourRed   = lipgloss.Color("#FF3333") // matches ansiRed   \033[1;31m
-	colourDim   = lipgloss.Color("#666666")
-	colourText  = lipgloss.Color("#DDDDDD")
+	// colourBlue — terminal bright blue (index 12), matches ansiBlue \033[1;34m.
+	colourBlue = lipgloss.Color("12")
+
+	// colourGreen — terminal bright green (index 10), matches ansiGreen \033[0;32m.
+	colourGreen = lipgloss.Color("10")
+
+	// colourRed — terminal bright red (index 9), matches ansiRed \033[1;31m.
+	colourRed = lipgloss.Color("9")
+
+	// colourDim — terminal bright black / dark grey (index 8).
+	colourDim = lipgloss.Color("8")
+
+	// colourText — terminal normal foreground (index 7).
+	colourText = lipgloss.Color("7")
 )
 
-// styles holds all Lip Gloss styles used by the TUI.
-// They are initialised once and shared across render calls.
+// styles holds all Lip Gloss styles used by the TUI, initialised once and
+// shared across render calls.
 var styles = newStyles()
 
 type tuiStyles struct {
-	// Outer layout
-	App       lipgloss.Style
-	LeftPane  lipgloss.Style
-	RightPane lipgloss.Style
-	Divider   lipgloss.Style
-
 	// Header
-	Header     lipgloss.Style
-	Breadcrumb lipgloss.Style
-	Version    lipgloss.Style
+	Header           lipgloss.Style
+	Version          lipgloss.Style
+	VimModeIndicator lipgloss.Style
+	GhostCommand     lipgloss.Style
 
-	// List items
+	// Horizontal command bar
+	CommandSelected   lipgloss.Style
+	CommandNormal     lipgloss.Style
+	CommandSeparator  lipgloss.Style
+	CommandScrollHint lipgloss.Style
+
+	// Inline box (preview + input + docs)
+	PreviewBox       lipgloss.Style
+	InputGhostPrompt lipgloss.Style
+	InputText        lipgloss.Style
+
+	// Description pane (right pane, kept for execScreenView)
+	DescTitle lipgloss.Style
+	DescBody  lipgloss.Style
+
+	// List items (used by CommandDelegate + exec dimmed list)
 	ItemNormal   lipgloss.Style
 	ItemSelected lipgloss.Style
 	ItemDim      lipgloss.Style
 
-	// Description pane
-	DescTitle lipgloss.Style
-	DescBody  lipgloss.Style
-
-	// Arg input pane
-	ArgPaneTitle  lipgloss.Style
-	ArgLabel      lipgloss.Style
-	ArgInput      lipgloss.Style
-	ArgInputFocus lipgloss.Style
-	ArgHint       lipgloss.Style
+	// Layout
+	Divider lipgloss.Style
 
 	// Status bar / help
 	HelpKey  lipgloss.Style
 	HelpDesc lipgloss.Style
 	HelpSep  lipgloss.Style
+
+	// Arg input pane (args.go — kept for future use)
+	ArgPaneTitle  lipgloss.Style
+	ArgLabel      lipgloss.Style
+	ArgInput      lipgloss.Style
+	ArgInputFocus lipgloss.Style
+	ArgHint       lipgloss.Style
 }
 
 func newStyles() tuiStyles {
 	return tuiStyles{
-		App: lipgloss.NewStyle().Padding(0),
-
-		LeftPane: lipgloss.NewStyle().
-			PaddingRight(1),
-
-		RightPane: lipgloss.NewStyle().
-			PaddingLeft(2),
-
-		Divider: lipgloss.NewStyle().
-			Foreground(colourDim),
-
 		Header: lipgloss.NewStyle().
 			Bold(true).
-			Foreground(colourBlue).
-			PaddingBottom(1),
-
-		Breadcrumb: lipgloss.NewStyle().
-			Foreground(colourDim),
+			Foreground(colourBlue),
 
 		Version: lipgloss.NewStyle().
-			Foreground(colourDim).
-			Italic(true),
+			Foreground(colourDim),
+
+		// VimModeIndicator sits left of the version: "  [VIM]  v2.9.19"
+		VimModeIndicator: lipgloss.NewStyle().
+			Foreground(colourDim),
+
+		// GhostCommand is the currently-hovered command name shown in the header.
+		GhostCommand: lipgloss.NewStyle().
+			Foreground(colourDim),
+
+		CommandSelected: lipgloss.NewStyle().
+			Bold(true).
+			Foreground(colourGreen),
+
+		CommandNormal: lipgloss.NewStyle().
+			Foreground(colourDim),
+
+		CommandSeparator: lipgloss.NewStyle().
+			Foreground(colourDim),
+
+		CommandScrollHint: lipgloss.NewStyle().
+			Foreground(colourDim),
+
+		// PreviewBox — rounded border in dim colour, compact padding.
+		PreviewBox: lipgloss.NewStyle().
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(colourDim).
+			Padding(0, 1),
+
+		// InputGhostPrompt — the non-editable "valet.sh service " prefix.
+		InputGhostPrompt: lipgloss.NewStyle().
+			Foreground(colourDim),
+
+		InputText: lipgloss.NewStyle().
+			Foreground(colourText),
+
+		DescTitle: lipgloss.NewStyle().
+			Bold(true).
+			Foreground(colourBlue),
+
+		DescBody: lipgloss.NewStyle().
+			Foreground(colourText),
 
 		ItemNormal: lipgloss.NewStyle().
 			Foreground(colourText),
@@ -104,18 +148,22 @@ func newStyles() tuiStyles {
 		ItemDim: lipgloss.NewStyle().
 			Foreground(colourDim),
 
-		DescTitle: lipgloss.NewStyle().
-			Bold(true).
-			Foreground(colourBlue).
-			PaddingBottom(1),
+		Divider: lipgloss.NewStyle().
+			Foreground(colourDim),
 
-		DescBody: lipgloss.NewStyle().
-			Foreground(colourText),
+		HelpKey: lipgloss.NewStyle().
+			Foreground(colourGreen),
 
+		HelpDesc: lipgloss.NewStyle().
+			Foreground(colourDim),
+
+		HelpSep: lipgloss.NewStyle().
+			Foreground(colourDim),
+
+		// Arg pane styles — kept for args.go (future multi-field input).
 		ArgPaneTitle: lipgloss.NewStyle().
 			Bold(true).
-			Foreground(colourBlue).
-			PaddingBottom(1),
+			Foreground(colourBlue),
 
 		ArgLabel: lipgloss.NewStyle().
 			Foreground(colourDim),
@@ -127,16 +175,6 @@ func newStyles() tuiStyles {
 			Foreground(colourGreen),
 
 		ArgHint: lipgloss.NewStyle().
-			Foreground(colourDim).
-			Italic(true),
-
-		HelpKey: lipgloss.NewStyle().
-			Foreground(colourGreen),
-
-		HelpDesc: lipgloss.NewStyle().
-			Foreground(colourDim),
-
-		HelpSep: lipgloss.NewStyle().
 			Foreground(colourDim),
 	}
 }

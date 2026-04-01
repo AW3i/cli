@@ -38,8 +38,8 @@ const (
 	// viewportMinHeight ensures the log area is always usable.
 	viewportMinHeight = 5
 
-	// execHeaderHeight: command line + divider.
-	execHeaderHeight = 2
+	// execHeaderHeight: command line only (no progress bar placeholder).
+	execHeaderHeight = 1
 
 	// execFooterHeight: divider + status/hint line.
 	execFooterHeight = 2
@@ -295,9 +295,8 @@ func (e ExecModel) execView() string {
 		versionPadding = 1
 	}
 	_, _ = fmt.Fprintln(&output, cmdLabel+strings.Repeat(" ", versionPadding)+versionLabel)
-	_, _ = fmt.Fprintln(&output, styles.Divider.Render(strings.Repeat("─", e.width)))
 
-	// Live log viewport.
+	// Live log viewport — no progress bar placeholder, just the output.
 	_, _ = fmt.Fprintln(&output, e.viewport.View())
 
 	// Footer.

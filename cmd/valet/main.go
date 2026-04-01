@@ -28,6 +28,13 @@ import (
 var Version = "dev"
 
 func main() {
+	// Check for --vi / -vi flag before cobra parses args so we can launch
+	// the TUI in vim mode directly.
+	vimMode := hasVIFlag(os.Args)
+	if vimMode {
+		os.Args = removeVIFlag(os.Args)
+	}
+
 	// Run the periodic update check before dispatching any command.
 	// Skipped on --help / --version / -h invocations so it never interrupts
 	// informational queries.
@@ -37,20 +44,14 @@ func main() {
 
 	root := newRootCmd()
 
-	if len(os.Args) == 1 {
-		// No arguments — launch the interactive TUI launcher.
-		// The launcher now handles execution internally via the exec panel,
-		// so Run() only returns args in the degenerate case.
-		result, err := tui.Run(root, Version)
+	// Launch TUI when: no arguments given, OR --vi flag was passed.
+	if len(os.Args) == 1 || vimMode {
+		_, err := tui.Run(root, Version, vimMode)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "TUI error: %v\n", err)
 			os.Exit(1)
 		}
-		if len(result.Args) == 0 {
-			os.Exit(0)
-		}
-		// Shouldn't reach here in normal flow — guard only.
-		os.Args = append([]string{os.Args[0]}, result.Args...)
+		os.Exit(0)
 	}
 
 	// Arguments present — show the execution panel on TTY, fall back to
@@ -59,6 +60,27 @@ func main() {
 		fmt.Fprintln(os.Stderr, commands.ErrorPrefix(err.Error()))
 		os.Exit(1)
 	}
+}
+
+// hasVIFlag returns true if os.Args contains --vi or -vi.
+func hasVIFlag(args []string) bool {
+	for _, a := range args[1:] {
+		if a == "--vi" || a == "-vi" {
+			return true
+		}
+	}
+	return false
+}
+
+// removeVIFlag returns args with all --vi / -vi occurrences removed.
+func removeVIFlag(args []string) []string {
+	result := make([]string, 0, len(args))
+	for _, a := range args {
+		if a != "--vi" && a != "-vi" {
+			result = append(result, a)
+		}
+	}
+	return result
 }
 
 func newRootCmd() *cobra.Command {
