@@ -191,35 +191,48 @@ func renderHorizontalList(commandList list.Model, maxWidth int) string {
 		}
 	}
 
-	// Build a window of items around the selected index that fits in maxWidth.
+	// Build a left-anchored sliding window that fits in maxWidth.
 	// Reserve space for the scroll indicators (2 chars each side).
 	const scrollIndicatorWidth = 2
 	available := maxWidth - scrollIndicatorWidth*2
 
-	// Start with just the selected item and expand outward.
-	start := selectedIdx
-	end := selectedIdx + 1
+	// Fill the window from the left (index 0) as far right as width allows.
+	start := 0
+	end := 0
+	current := 0
 
-	current := lipgloss.Width(labels[selectedIdx])
-
-	// Expand rightward.
 	for end < len(labels) {
-		next := lipgloss.Width(sep) + lipgloss.Width(labels[end])
-		if current+next > available {
+		itemWidth := lipgloss.Width(labels[end])
+		if end > 0 {
+			itemWidth += lipgloss.Width(sep)
+		}
+		if current+itemWidth > available {
 			break
 		}
-		current += next
+		current += itemWidth
 		end++
 	}
 
-	// Expand leftward.
-	for start > 0 {
-		prev := lipgloss.Width(labels[start-1]) + lipgloss.Width(sep)
-		if current+prev > available {
-			break
+	// If the selected item is beyond the current window, slide the window
+	// rightward until it is visible. The left edge only advances when forced.
+	for selectedIdx >= end {
+		// Remove the leftmost item from the window.
+		leftWidth := lipgloss.Width(labels[start])
+		if start > 0 {
+			leftWidth += lipgloss.Width(sep)
 		}
-		current += prev
-		start--
+		current -= leftWidth
+		start++
+
+		// Add the next item on the right if there is one.
+		if end < len(labels) {
+			rightWidth := lipgloss.Width(labels[end])
+			if end > start {
+				rightWidth += lipgloss.Width(sep)
+			}
+			current += rightWidth
+			end++
+		}
 	}
 
 	// Assemble the visible segment.
