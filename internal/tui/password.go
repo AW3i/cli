@@ -19,7 +19,6 @@ import (
 
 	"charm.land/bubbles/v2/textinput"
 	tea "charm.land/bubbletea/v2"
-	"charm.land/lipgloss/v2"
 )
 
 // PasswordBox is a masked single-line input shown before executing a command
@@ -30,18 +29,14 @@ import (
 //     while the user is typing.
 //   - TakePassword() moves it to a []byte, clears the input, and returns the
 //     value. The caller (launcher.go) passes it to ansible.RunSubprocess()
-//     which zeros it immediately after writing it to ANSIBLE_BECOME_PASS env var.
+//     which zeros it immediately after writing it to the subprocess env.
 //   - No caching between commands — PasswordBox is discarded after each use.
-//   - stdin is NOT used — Bubble Tea owns stdin during TUI execution.
 type PasswordBox struct {
 	// input is the masked textinput.
 	input textinput.Model
 
 	// command is shown in the prompt context line above the input.
 	command string
-
-	// showEmptyError is true when the user pressed Enter on an empty field.
-	showEmptyError bool
 
 	// width is the total width available for the box.
 	width int
@@ -82,12 +77,6 @@ func (b *PasswordBox) TakePassword() []byte {
 	return val
 }
 
-// InputView returns the rendered textinput for embedding in the main content area.
-// The input field itself is rendered directly in the screen, not inside a box.
-func (b PasswordBox) InputView() string {
-	return b.input.View()
-}
-
 // IsEmpty returns true when no password has been typed yet.
 func (b PasswordBox) IsEmpty() bool {
 	return strings.TrimSpace(b.input.Value()) == ""
@@ -100,18 +89,16 @@ func (b PasswordBox) Update(msg tea.Msg) (PasswordBox, tea.Cmd) {
 	return b, cmd
 }
 
-// MarkEmptyError sets the error state shown when user presses Enter on an
-// empty field, so they get clear feedback without accidentally submitting.
-func (b *PasswordBox) MarkEmptyError() {
-	b.showEmptyError = true
-}
-
-// View renders only the hint line (error or help text).
-// The password input itself is rendered separately via InputView(),
-// and the command is shown in the header, so there's no redundancy.
+// View renders the password box as a bordered string.
 func (b PasswordBox) View() string {
-	if b.showEmptyError {
-		return lipgloss.NewStyle().Foreground(colourRed).Render("Password cannot be empty.")
-	}
-	return styles.HelpDesc.Render("Required for privileged operations.")
+	innerWidth := b.width - 4
+
+	contextLine := styles.GhostCommand.Render("valet.sh " + b.command)
+	hintLine := styles.HelpDesc.Render("Required for privileged operations.")
+
+	content := contextLine + "\n" +
+		b.input.View() + "\n\n" +
+		hintLine
+
+	return styles.PreviewBox.Width(innerWidth).Render(content)
 }
