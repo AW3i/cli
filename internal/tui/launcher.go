@@ -410,10 +410,19 @@ func (m model) headerView() string {
 	breadcrumb := strings.Join(crumbs, " › ")
 	title := styles.Header.Render("▶ " + breadcrumb)
 
-	// Ghost text: currently hovered command name shown in dim after the breadcrumb.
-	ghost := ""
-	if sel, ok := m.commandList.SelectedItem().(CommandItem); ok && !sel.IsBack && m.activeScreen == screenList {
-		ghost = "  " + styles.GhostCommand.Render(sel.Title())
+	// Right side of the title — changes based on state:
+	// - screenInline: show the live textinput ("valet.sh db █")
+	// - screenList:   show dim ghost text of the hovered command ("  db")
+	var titleSuffix string
+	switch m.activeScreen {
+	case screenInline:
+		if m.inlineBox != nil {
+			titleSuffix = "  " + m.inlineBox.InputView()
+		}
+	case screenList:
+		if sel, ok := m.commandList.SelectedItem().(CommandItem); ok && !sel.IsBack {
+			titleSuffix = "  " + styles.GhostCommand.Render(sel.Title())
+		}
 	}
 
 	// Right side: [VIM] indicator (if active) · version.
@@ -422,18 +431,17 @@ func (m model) headerView() string {
 		vimIndicator = styles.VimModeIndicator.Render("[VIM]") + "  "
 	}
 	versionLabel := styles.Version.Render("v" + m.version)
-
 	right := vimIndicator + versionLabel
 
 	// Pad to right edge.
-	leftLen := lipgloss.Width(title) + lipgloss.Width(ghost)
+	leftLen := lipgloss.Width(title) + lipgloss.Width(titleSuffix)
 	rightLen := lipgloss.Width(right)
 	versionPadding := m.width - leftLen - rightLen - 1
 	if versionPadding < 1 {
 		versionPadding = 1
 	}
 
-	return title + ghost + strings.Repeat(" ", versionPadding) + right
+	return title + titleSuffix + strings.Repeat(" ", versionPadding) + right
 }
 
 // --- Layout helpers -------------------------------------------------------------
