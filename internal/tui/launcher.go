@@ -22,6 +22,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 	"github.com/spf13/cobra"
+	"github.com/valet-sh/cli/internal/ansible"
 )
 
 // screen tracks which pane has keyboard focus.
@@ -30,6 +31,7 @@ type screen int
 const (
 	screenList screen = iota // navigating the command list
 	screenArgs               // filling in argument fields
+	screenExec               // ansible is running, log panel is shown
 )
 
 // stackEntry records a navigation level so we can pop back with Esc.
@@ -63,6 +65,9 @@ type model struct {
 	// selectedItem holds the command item the user pressed Enter on.
 	// Non-nil means the TUI is about to quit with a selection.
 	selectedItem *CommandItem
+
+	// execModel is the execution panel shown during ansible runs.
+	execModel ExecModel
 
 	// width/height of the terminal.
 	width  int
@@ -184,6 +189,13 @@ func (m model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		var cmd tea.Cmd
 		m.argPane, cmd = m.argPane.Update(msg)
 		return m, cmd
+
+	case screenExec:
+		// Exec model handles its own key routing.
+		// Any key after done → exec model sends tea.Quit.
+		var cmd tea.Cmd
+		m.execModel, cmd = m.execModel.Update(msg)
+		return m, cmd
 	}
 
 	// Forward to the list.
@@ -219,14 +231,47 @@ func (m model) selectItem() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
-	// Leaf command with no args → execute immediately.
+	// Leaf command with no args → start execution panel immediately.
 	m.selectedItem = &sel
-	return m, tea.Quit
+	return m.startExec()
 }
 
 // executeSelection is called from screenArgs when the user confirms args.
 func (m model) executeSelection() (tea.Model, tea.Cmd) {
-	return m, tea.Quit
+	return m.startExec()
+}
+
+// startExec transitions to the execution screen, starts ansible as a
+// subprocess, and kicks off the log tailer.
+func (m model) startExec() (tea.Model, tea.Cmd) {
+	if m.selectedItem == nil {
+		return m, tea.Quit
+	}
+
+	// Build full arg list: command path + arg pane values.
+	args := commandPath(m)
+	args = append(args, m.argPane.Values()...)
+
+	// Build RunOpts from the selected cobra command.
+	opts, err := resolveRunOpts(m.root, args)
+	if err != nil {
+		// Shouldn't happen — user selected from the command tree.
+		return m, tea.Quit
+	}
+
+	proc, err := ansible.RunSubprocess(opts)
+	if err != nil {
+		// Couldn't start ansible — exit and let the error surface.
+		return m, tea.Quit
+	}
+
+	commandStr := strings.Join(args, " ")
+	rightW := m.descWidth()
+	rightH := m.listHeight() + execHeaderHeight + execFooterHeight
+	m.execModel = NewExecModel(commandStr, m.version, true, proc, rightW, rightH)
+	m.activeScreen = screenExec
+
+	return m, m.execModel.Init()
 }
 
 // pushStack navigates into a submenu.
@@ -257,6 +302,8 @@ func (m model) routeMsg(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch m.activeScreen {
 	case screenArgs:
 		m.argPane, cmd = m.argPane.Update(msg)
+	case screenExec:
+		m.execModel, cmd = m.execModel.Update(msg)
 	default:
 		m.current, cmd = m.current.Update(msg)
 		m.stack[len(m.stack)-1].list = m.current
@@ -282,6 +329,11 @@ func (m model) resizeAll() model {
 		}
 	}
 
+	// Resize exec model if active.
+	if m.activeScreen == screenExec {
+		m.execModel = m.execModel.SetSize(m.descWidth(), m.height)
+	}
+
 	return m
 }
 
@@ -295,6 +347,11 @@ func (m model) View() tea.View {
 }
 
 func (m model) render() string {
+	// Execution screen: left pane dimmed + exec panel on the right.
+	if m.activeScreen == screenExec {
+		return m.execScreenView()
+	}
+
 	var sb strings.Builder
 
 	// Header
@@ -315,6 +372,24 @@ func (m model) render() string {
 	_, _ = fmt.Fprintln(&sb, renderHelpBar(m.width))
 
 	return sb.String()
+}
+
+// execScreenView renders the two-pane layout with the command list dimmed on
+// the left and the execution panel on the right.
+func (m model) execScreenView() string {
+	lw := m.listWidth()
+	rw := m.descWidth()
+
+	// Left pane: dim the list to indicate it's inactive.
+	leftContent := styles.ItemDim.Render(m.current.View())
+	left := styles.LeftPane.Width(lw).Render(leftContent)
+
+	divider := styles.Divider.Render(strings.Repeat("│", m.height))
+
+	// Right pane: exec model.
+	right := lipgloss.NewStyle().Width(rw).Render(m.execModel.View())
+
+	return lipgloss.JoinHorizontal(lipgloss.Top, left, divider, right)
 }
 
 func (m model) headerView() string {

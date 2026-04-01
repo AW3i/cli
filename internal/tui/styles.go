@@ -26,6 +26,7 @@ import (
 var (
 	colourBlue  = lipgloss.Color("#1E90FF") // matches ansiBlue  \033[1;34m
 	colourGreen = lipgloss.Color("#00CC00") // matches ansiGreen \033[0;32m
+	colourRed   = lipgloss.Color("#FF3333") // matches ansiRed   \033[1;31m
 	colourDim   = lipgloss.Color("#666666")
 	colourText  = lipgloss.Color("#DDDDDD")
 )
