@@ -29,9 +29,10 @@ import (
 type screen int
 
 const (
-	screenList   screen = iota // navigating the horizontal command bar
-	screenInline               // inline box open (arg input + docs)
-	screenExec                 // ansible is running, exec panel shown
+	screenList     screen = iota // navigating the horizontal command bar
+	screenInline                 // inline box open (arg input + docs)
+	screenPassword               // sudo password prompt shown before exec
+	screenExec                   // ansible is running, exec panel shown
 )
 
 // stackEntry records a navigation level so we can Esc back.
@@ -64,6 +65,10 @@ type model struct {
 	// inlineBox is the unified arg-input + docs box shown when a command
 	// with arguments (or any command, for previewing) is selected.
 	inlineBox *InlineBox
+
+	// passwordBox is shown before executing a command that requires sudo.
+	// It is discarded immediately after the password is handed to Ansible.
+	passwordBox *PasswordBox
 
 	// activeScreen controls which component receives keystrokes.
 	activeScreen screen
@@ -182,6 +187,9 @@ func (m model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case screenInline:
 		return m.handleInlineKey(key, msg)
 
+	case screenPassword:
+		return m.handlePasswordKey(key, msg)
+
 	case screenExec:
 		var cmd tea.Cmd
 		m.execModel, cmd = m.execModel.Update(msg)
@@ -250,7 +258,8 @@ func (m model) handleInlineKey(key string, msg tea.KeyPressMsg) (tea.Model, tea.
 		return m, nil
 
 	case "enter":
-		return m.executeInline()
+		// Transition to the password screen before executing.
+		return m.openPasswordScreen()
 	}
 
 	// Route to inline box for doc scrolling and text input.
@@ -258,6 +267,48 @@ func (m model) handleInlineKey(key string, msg tea.KeyPressMsg) (tea.Model, tea.
 		var cmd tea.Cmd
 		updated, cmd := m.inlineBox.Update(msg)
 		m.inlineBox = &updated
+		return m, cmd
+	}
+
+	return m, nil
+}
+
+// openPasswordScreen transitions to screenPassword before executing a command.
+func (m model) openPasswordScreen() (tea.Model, tea.Cmd) {
+	if m.inlineBox == nil {
+		return m, nil
+	}
+	commandStr := m.commandPathFromStack()
+	if val := m.inlineBox.Value(); val != "" {
+		commandStr += " " + val
+	}
+	box := NewPasswordBox(commandStr, m.width)
+	m.passwordBox = &box
+	m.activeScreen = screenPassword
+	return m, nil
+}
+
+// handlePasswordKey handles key events on the password screen.
+func (m model) handlePasswordKey(key string, msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	switch key {
+	case "esc":
+		// Cancel — return to inline box.
+		m.passwordBox = nil
+		m.activeScreen = screenInline
+		return m, nil
+
+	case "enter":
+		if m.passwordBox != nil && !m.passwordBox.IsEmpty() {
+			return m.executeWithPassword()
+		}
+		// Allow executing with empty password (some systems have NOPASSWD).
+		return m.executeWithPassword()
+	}
+
+	if m.passwordBox != nil {
+		var cmd tea.Cmd
+		updated, cmd := m.passwordBox.Update(msg)
+		m.passwordBox = &updated
 		return m, cmd
 	}
 
@@ -288,8 +339,9 @@ func (m model) selectItem() (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// executeInline executes the command with whatever the user typed in the inline box.
-func (m model) executeInline() (tea.Model, tea.Cmd) {
+// executeWithPassword collects the password from the password screen,
+// then starts the ansible subprocess with it.
+func (m model) executeWithPassword() (tea.Model, tea.Cmd) {
 	if m.inlineBox == nil {
 		return m, nil
 	}
@@ -303,6 +355,13 @@ func (m model) executeInline() (tea.Model, tea.Cmd) {
 	opts, err := resolveRunOpts(m.root, args)
 	if err != nil {
 		return m, tea.Quit
+	}
+
+	// Take the password and attach it to opts. The password slice is zeroed
+	// inside RunSubprocess() immediately after being written to the env.
+	if m.passwordBox != nil {
+		opts.BecomePassword = m.passwordBox.TakePassword()
+		m.passwordBox = nil
 	}
 
 	proc, err := ansible.RunSubprocess(opts)
@@ -346,6 +405,12 @@ func (m model) routeMsg(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.inlineBox = &updated
 			cmd = c
 		}
+	case screenPassword:
+		if m.passwordBox != nil {
+			updated, c := m.passwordBox.Update(msg)
+			m.passwordBox = &updated
+			cmd = c
+		}
 	case screenExec:
 		m.execModel, cmd = m.execModel.Update(msg)
 	default:
@@ -386,11 +451,19 @@ func (m model) render() string {
 	_, _ = fmt.Fprintln(&output, dividerLine(m.width))
 	_, _ = fmt.Fprintln(&output, renderHorizontalList(m.commandList, m.width))
 
-	if m.activeScreen == screenInline && m.inlineBox != nil {
+	switch {
+	case m.activeScreen == screenPassword && m.passwordBox != nil:
+		_, _ = fmt.Fprintln(&output, m.passwordBox.View())
+		_, _ = fmt.Fprintln(&output, dividerLine(m.width))
+		_, _ = fmt.Fprint(&output,
+			styles.HelpKey.Render("↵")+styles.HelpDesc.Render(" confirm")+" · "+
+				styles.HelpKey.Render("esc")+styles.HelpDesc.Render(" back"),
+		)
+	case m.activeScreen == screenInline && m.inlineBox != nil:
 		_, _ = fmt.Fprintln(&output, m.inlineBox.View())
 		_, _ = fmt.Fprintln(&output, dividerLine(m.width))
 		_, _ = fmt.Fprint(&output, renderInlineHelpBar(m.width))
-	} else {
+	default:
 		// Show filter input line when actively filtering.
 		if m.commandList.FilterState() == list.Filtering {
 			_, _ = fmt.Fprintln(&output, "  "+m.commandList.FilterInput.View())
@@ -411,13 +484,18 @@ func (m model) headerView() string {
 	title := styles.Header.Render("▶ " + breadcrumb)
 
 	// Right side of the title — changes based on state:
-	// - screenInline: show the live textinput ("valet.sh db █")
-	// - screenList:   show dim ghost text of the hovered command ("  db")
+	// - screenInline:   show the live textinput ("valet.sh db █")
+	// - screenPassword: show the command being run (dim, locked)
+	// - screenList:     show dim ghost text of the hovered command
 	var titleSuffix string
 	switch m.activeScreen {
 	case screenInline:
 		if m.inlineBox != nil {
 			titleSuffix = "  " + m.inlineBox.InputView()
+		}
+	case screenPassword:
+		if m.passwordBox != nil {
+			titleSuffix = "  " + styles.GhostCommand.Render(m.passwordBox.command)
 		}
 	case screenList:
 		if sel, ok := m.commandList.SelectedItem().(CommandItem); ok && !sel.IsBack {

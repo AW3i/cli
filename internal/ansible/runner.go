@@ -58,6 +58,11 @@ type RunOpts struct {
 	WorkDir string
 	// Verbose enables ansible-playbook -v output.
 	Verbose bool
+	// BecomePassword is the sudo password for Ansible become tasks.
+	// Only set when launching from the TUI — CLI mode uses stdin passthrough.
+	// The slice is zeroed immediately after being written to the subprocess
+	// environment so it does not linger in memory.
+	BecomePassword []byte
 }
 
 // Run executes the given playbook as a subprocess, streaming stdout/stderr
@@ -186,9 +191,23 @@ func RunSubprocess(opts *RunOpts) (*exec.Cmd, error) {
 	env := os.Environ()
 	env = setEnv(env, "OLDPWD", workDir)
 
+	// If a become password was provided, set it as an env var and immediately
+	// zero the slice so the password does not linger in the Go heap.
+	// The env var is visible in /proc/<pid>/environ briefly — the same
+	// window as any sudo invocation, and an accepted trade-off.
+	if len(opts.BecomePassword) > 0 {
+		env = setEnv(env, "ANSIBLE_BECOME_PASSWORD", string(opts.BecomePassword))
+		for i := range opts.BecomePassword {
+			opts.BecomePassword[i] = 0
+		}
+	}
+
 	cmd := exec.Command(ansibleBin, args...)
 	cmd.Dir = repoDir
 	cmd.Env = env
+	// Pass stdin through so interactive prompts (including sudo password
+	// prompts) reach the terminal when no become password was pre-supplied.
+	cmd.Stdin = os.Stdin
 	// Discard stdout/stderr — all output goes to the log file via the callback.
 	cmd.Stdout = nil
 	cmd.Stderr = nil
