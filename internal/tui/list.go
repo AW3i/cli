@@ -168,17 +168,24 @@ func NewCommandDelegate() CommandDelegate {
 func renderHelpBar(width int) string {
 	bindings := []struct{ key, desc string }{
 		{"↑/↓", "navigate"},
+		{"type to search", ""},
 		{"↵", "select"},
 		{"esc", "back"},
 		{"q", "quit"},
+		{"ctrl+c", "force quit"},
 	}
 
 	parts := make([]string, 0, len(bindings)*2)
 	for i, b := range bindings {
-		parts = append(parts,
-			styles.HelpKey.Render(b.key),
-			styles.HelpDesc.Render(b.desc),
-		)
+		if b.desc == "" {
+			// Self-describing hint — render key only, no trailing desc space.
+			parts = append(parts, styles.HelpKey.Render(b.key))
+		} else {
+			parts = append(parts,
+				styles.HelpKey.Render(b.key),
+				styles.HelpDesc.Render(" "+b.desc),
+			)
+		}
 		if i < len(bindings)-1 {
 			parts = append(parts, styles.HelpSep.Render(" · "))
 		}

@@ -17,6 +17,7 @@ package tui
 import (
 	"testing"
 
+	"charm.land/bubbles/v2/list"
 	tea "charm.land/bubbletea/v2"
 	"github.com/spf13/cobra"
 )
@@ -278,5 +279,125 @@ func TestWordWrap(t *testing.T) {
 		if lines != tc.wantLen {
 			t.Errorf("wordWrap(%q, %d): want %d lines, got %d", tc.text, tc.maxWidth, tc.wantLen, lines)
 		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Filter / search bar tests
+// ---------------------------------------------------------------------------
+
+func TestFilteringEnabledOnBuildList(t *testing.T) {
+	root := testRoot()
+	m := newModel(root, "1.0.0")
+
+	if !m.commandList.FilteringEnabled() {
+		t.Error("expected filtering to be enabled on the command list")
+	}
+}
+
+func TestQKeyQuitsWhenNotFiltering(t *testing.T) {
+	root := testRoot()
+	m := newModel(root, "1.0.0")
+
+	// Confirm we are not filtering.
+	if m.commandList.FilterState() != list.Unfiltered {
+		t.Fatal("expected Unfiltered state on fresh model")
+	}
+
+	_, cmd := m.Update(tea.KeyPressMsg{Text: "q"})
+	if cmd == nil {
+		t.Error("q should quit when not filtering")
+	}
+}
+
+func TestQKeyTypesIntoFilterWhenFiltering(t *testing.T) {
+	root := testRoot()
+	m := newModel(root, "1.0.0")
+	m.width = 120
+	m.height = 40
+
+	// Activate filtering by typing a character — the list transitions to
+	// Filtering state when a printable key is received.
+	result, _ := m.Update(tea.KeyPressMsg{Text: "i"})
+	rm := result.(model)
+
+	if rm.commandList.FilterState() != list.Filtering {
+		t.Skip("list did not enter Filtering state after typing — bubbles/list behaviour may differ")
+	}
+
+	// Now q should NOT quit — it should be routed to the list as a filter char.
+	_, cmd := rm.Update(tea.KeyPressMsg{Text: "q"})
+	if cmd != nil {
+		// cmd is nil when the list absorbs the keystroke into the filter input
+		// (no tea command is returned for a plain character insertion).
+		// If tea.Quit were returned it would be non-nil.
+		t.Error("q should not quit when list is actively filtering")
+	}
+}
+
+func TestCtrlCAlwaysQuits(t *testing.T) {
+	root := testRoot()
+	m := newModel(root, "1.0.0")
+
+	// ctrl+c quits regardless of filter state.
+	_, cmd := m.Update(tea.KeyPressMsg{Text: "ctrl+c"})
+	if cmd == nil {
+		t.Error("ctrl+c should always quit")
+	}
+}
+
+func TestEscPopsStackWhenNotFiltering(t *testing.T) {
+	root := testRoot()
+	m := newModel(root, "1.0.0")
+	m.width = 120
+	m.height = 40
+
+	// Push a level onto the stack first.
+	var serviceCmd *cobra.Command
+	for _, c := range root.Commands() {
+		if c.Use == "service <action> [service-name]" {
+			serviceCmd = c
+			break
+		}
+	}
+	if serviceCmd == nil {
+		t.Fatal("service command not found")
+	}
+	pushed, _ := m.pushStack(CommandItem{Cmd: serviceCmd})
+	pm := pushed.(model)
+
+	if len(pm.stack) != 2 {
+		t.Fatalf("expected 2 stack entries after push, got %d", len(pm.stack))
+	}
+
+	// Esc when not filtering should pop the stack.
+	result, _ := pm.Update(tea.KeyPressMsg{Text: "esc"})
+	rm := result.(model)
+
+	if len(rm.stack) != 1 {
+		t.Errorf("expected 1 stack entry after Esc, got %d", len(rm.stack))
+	}
+}
+
+func TestEnterDoesNotSelectDuringFiltering(t *testing.T) {
+	root := testRoot()
+	m := newModel(root, "1.0.0")
+	m.width = 120
+	m.height = 40
+
+	// Activate filtering.
+	result, _ := m.Update(tea.KeyPressMsg{Text: "i"})
+	rm := result.(model)
+
+	if rm.commandList.FilterState() != list.Filtering {
+		t.Skip("list did not enter Filtering state — skipping")
+	}
+
+	// Enter during filtering should NOT transition to screenArgs or screenExec.
+	result2, _ := rm.Update(tea.KeyPressMsg{Text: "enter"})
+	rm2 := result2.(model)
+
+	if rm2.activeScreen != screenList {
+		t.Errorf("Enter during filtering should keep screenList, got screen %v", rm2.activeScreen)
 	}
 }

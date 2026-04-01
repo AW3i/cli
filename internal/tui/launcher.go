@@ -127,9 +127,19 @@ func buildList(cmds []*cobra.Command, withBack bool, width, height int) list.Mod
 	l := list.New(items, delegate, width, height)
 	l.SetShowTitle(false)
 	l.SetShowStatusBar(false)
-	l.SetFilteringEnabled(false)
+	l.SetFilteringEnabled(true)
 	l.SetShowHelp(false)
 	l.DisableQuitKeybindings()
+
+	// Style the filter input to match the valet-sh palette.
+	l.FilterInput.Prompt = "/ "
+	filterStyles := l.FilterInput.Styles()
+	filterStyles.Focused.Prompt = lipgloss.NewStyle().Foreground(colourBlue).Bold(true)
+	filterStyles.Focused.Text = lipgloss.NewStyle().Foreground(colourText)
+	filterStyles.Blurred.Prompt = lipgloss.NewStyle().Foreground(colourDim)
+	filterStyles.Blurred.Text = lipgloss.NewStyle().Foreground(colourDim)
+	l.FilterInput.SetStyles(filterStyles)
+
 	return l
 }
 
@@ -159,8 +169,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 func (m model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	key := msg.String()
 
-	// Global quit — always works.
-	if key == "ctrl+c" || key == "q" {
+	// ctrl+c always quits unconditionally.
+	if key == "ctrl+c" {
+		return m, tea.Quit
+	}
+
+	// q quits only when the list is not actively filtering — when filtering,
+	// q is a typeable search character like any other letter.
+	if key == "q" && m.commandList.FilterState() != list.Filtering {
 		return m, tea.Quit
 	}
 
@@ -168,9 +184,18 @@ func (m model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case screenList:
 		switch key {
 		case "esc":
-			return m.popStack()
+			// When actively filtering, let the list handle Esc to clear the
+			// filter. Only pop the navigation stack when not filtering.
+			if m.commandList.FilterState() != list.Filtering {
+				return m.popStack()
+			}
 		case "enter":
-			return m.selectItem()
+			// When actively filtering, let the list handle Enter to commit the
+			// filter selection (transitions to FilterApplied). The user presses
+			// Enter a second time to actually execute the highlighted command.
+			if m.commandList.FilterState() != list.Filtering {
+				return m.selectItem()
+			}
 		}
 
 	case screenArgs:
