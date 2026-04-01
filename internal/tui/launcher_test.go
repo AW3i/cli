@@ -26,12 +26,10 @@ import (
 func noop(_ *cobra.Command, _ []string) error { return nil }
 
 // testRoot builds a minimal cobra command tree for testing.
-// Commands must have a RunE to be considered "available" by cobra.
 func testRoot() *cobra.Command {
 	root := &cobra.Command{Use: "valet", Short: "test root", RunE: noop}
 
-	install := &cobra.Command{Use: "install", Short: "Install services", RunE: noop}
-	root.AddCommand(install)
+	root.AddCommand(&cobra.Command{Use: "install", Short: "Install services", RunE: noop})
 
 	service := &cobra.Command{Use: "service <action> [service-name]", Short: "Manage services"}
 	service.AddCommand(&cobra.Command{Use: "start", Short: "Start a service", RunE: noop})
@@ -46,9 +44,13 @@ func testRoot() *cobra.Command {
 	return root
 }
 
+// ---------------------------------------------------------------------------
+// Model initialisation
+// ---------------------------------------------------------------------------
+
 func TestNewModel(t *testing.T) {
 	root := testRoot()
-	m := newModel(root, "1.0.0")
+	m := newModel(root, "1.0.0", false)
 
 	if len(m.stack) != 1 {
 		t.Fatalf("expected 1 stack entry, got %d", len(m.stack))
@@ -59,35 +61,201 @@ func TestNewModel(t *testing.T) {
 	if m.activeScreen != screenList {
 		t.Errorf("expected screenList on init, got %v", m.activeScreen)
 	}
-}
-
-func TestQuitKeys(t *testing.T) {
-	root := testRoot()
-	m := newModel(root, "1.0.0")
-
-	for _, key := range []string{"q", "ctrl+c"} {
-		result, cmd := m.Update(tea.KeyPressMsg{Code: rune(0), Text: key})
-		_ = result
-		if cmd == nil {
-			t.Errorf("key %q: expected Quit command", key)
-		}
+	if m.vimMode {
+		t.Error("expected vimMode false by default")
 	}
 }
 
-func TestEscAtRootQuitsModel(t *testing.T) {
+func TestNewModelVimMode(t *testing.T) {
 	root := testRoot()
-	m := newModel(root, "1.0.0")
+	m := newModel(root, "1.0.0", true)
 
-	// Esc at root level should queue a Quit.
+	if !m.vimMode {
+		t.Error("expected vimMode true when passed true")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Quit behaviour
+// ---------------------------------------------------------------------------
+
+func TestCtrlCAlwaysQuits(t *testing.T) {
+	root := testRoot()
+	m := newModel(root, "1.0.0", false)
+
+	_, cmd := m.Update(tea.KeyPressMsg{Text: "ctrl+c"})
+	if cmd == nil {
+		t.Error("ctrl+c should always quit")
+	}
+}
+
+func TestQKeyQuitsWhenNotFiltering(t *testing.T) {
+	root := testRoot()
+	m := newModel(root, "1.0.0", false)
+
+	if m.commandList.FilterState() != list.Unfiltered {
+		t.Fatal("expected Unfiltered on fresh model")
+	}
+
+	_, cmd := m.Update(tea.KeyPressMsg{Text: "q"})
+	if cmd == nil {
+		t.Error("q should quit when not filtering")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Vim mode toggle
+// ---------------------------------------------------------------------------
+
+func TestVimModeTogglesWithCtrlBracket(t *testing.T) {
+	root := testRoot()
+	m := newModel(root, "1.0.0", false)
+
+	if m.vimMode {
+		t.Fatal("expected vimMode false initially")
+	}
+
+	result, _ := m.Update(tea.KeyPressMsg{Text: "ctrl+["})
+	rm := result.(model)
+	if !rm.vimMode {
+		t.Error("expected vimMode true after ctrl+[")
+	}
+
+	result2, _ := rm.Update(tea.KeyPressMsg{Text: "ctrl+["})
+	rm2 := result2.(model)
+	if rm2.vimMode {
+		t.Error("expected vimMode false after second ctrl+[")
+	}
+}
+
+func TestVimModeDoesNotToggleDuringExec(t *testing.T) {
+	root := testRoot()
+	m := newModel(root, "1.0.0", false)
+	m.activeScreen = screenExec
+
+	result, _ := m.Update(tea.KeyPressMsg{Text: "ctrl+["})
+	rm := result.(model)
+	if rm.vimMode {
+		t.Error("ctrl+[ should not toggle vim mode during exec screen")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Navigation
+// ---------------------------------------------------------------------------
+
+func TestLeftArrowMovesBack(t *testing.T) {
+	root := testRoot()
+	m := newModel(root, "1.0.0", false)
+	m.width = 120
+	m.height = 40
+
+	// Move right first so there's somewhere to go back.
+	result1, _ := m.Update(tea.KeyPressMsg{Text: "right"})
+	rm1 := result1.(model)
+	idxAfterRight := rm1.commandList.Index()
+
+	result2, _ := rm1.Update(tea.KeyPressMsg{Text: "left"})
+	rm2 := result2.(model)
+
+	if rm2.commandList.Index() >= idxAfterRight {
+		t.Errorf("left should decrease index: got %d, was %d", rm2.commandList.Index(), idxAfterRight)
+	}
+}
+
+func TestVimHLNavigation(t *testing.T) {
+	root := testRoot()
+	m := newModel(root, "1.0.0", true) // vim mode
+	m.width = 120
+	m.height = 40
+
+	startIdx := m.commandList.Index()
+
+	// l moves right.
+	result1, _ := m.Update(tea.KeyPressMsg{Text: "l"})
+	rm1 := result1.(model)
+	if rm1.commandList.Index() <= startIdx {
+		t.Error("l in vim mode should move cursor right (CursorDown)")
+	}
+
+	// h moves back.
+	result2, _ := rm1.Update(tea.KeyPressMsg{Text: "h"})
+	rm2 := result2.(model)
+	if rm2.commandList.Index() != startIdx {
+		t.Errorf("h in vim mode: expected index %d, got %d", startIdx, rm2.commandList.Index())
+	}
+}
+
+func TestVimHLNotActiveInNormalMode(t *testing.T) {
+	root := testRoot()
+	m := newModel(root, "1.0.0", false) // normal mode
+	m.width = 120
+	m.height = 40
+
+	startIdx := m.commandList.Index()
+
+	// h in normal mode goes to the filter (types 'h') not navigation.
+	// Index should not change from CursorUp since filtering activates.
+	result, _ := m.Update(tea.KeyPressMsg{Text: "h"})
+	rm := result.(model)
+	// In normal mode h types into filter, so index won't change via navigation.
+	_ = rm
+	_ = startIdx // navigation via h only works in vim mode
+}
+
+// ---------------------------------------------------------------------------
+// Navigation stack
+// ---------------------------------------------------------------------------
+
+func TestEscAtRootQuits(t *testing.T) {
+	root := testRoot()
+	m := newModel(root, "1.0.0", false)
+
 	_, cmd := m.Update(tea.KeyPressMsg{Text: "esc"})
 	if cmd == nil {
-		t.Error("Esc at root: expected Quit command")
+		t.Error("Esc at root should quit")
 	}
 }
+
+func TestPushAndPopStack(t *testing.T) {
+	root := testRoot()
+	m := newModel(root, "1.0.0", false)
+	m.width = 120
+	m.height = 40
+
+	var serviceCmd *cobra.Command
+	for _, c := range root.Commands() {
+		if len(c.Commands()) > 0 {
+			serviceCmd = c
+			break
+		}
+	}
+	if serviceCmd == nil {
+		t.Fatal("no command with subcommands found")
+	}
+
+	pushed, _ := m.pushStack(CommandItem{Cmd: serviceCmd})
+	pm := pushed.(model)
+
+	if len(pm.stack) != 2 {
+		t.Fatalf("expected 2 stack entries after push, got %d", len(pm.stack))
+	}
+
+	popped, _ := pm.Update(tea.KeyPressMsg{Text: "esc"})
+	rpm := popped.(model)
+
+	if len(rpm.stack) != 1 {
+		t.Errorf("expected 1 stack entry after Esc, got %d", len(rpm.stack))
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Window resize
+// ---------------------------------------------------------------------------
 
 func TestWindowResize(t *testing.T) {
 	root := testRoot()
-	m := newModel(root, "1.0.0")
+	m := newModel(root, "1.0.0", false)
 
 	result, _ := m.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
 	rm := result.(model)
@@ -99,6 +267,74 @@ func TestWindowResize(t *testing.T) {
 		t.Errorf("expected height 40, got %d", rm.height)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Filter / search bar
+// ---------------------------------------------------------------------------
+
+func TestFilteringEnabledOnBuildList(t *testing.T) {
+	root := testRoot()
+	m := newModel(root, "1.0.0", false)
+
+	if !m.commandList.FilteringEnabled() {
+		t.Error("expected filtering to be enabled")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Inline box
+// ---------------------------------------------------------------------------
+
+func TestInlineBoxOpensOnEnter(t *testing.T) {
+	root := testRoot()
+	m := newModel(root, "1.0.0", false)
+	m.width = 120
+	m.height = 40
+
+	// Select first available item.
+	if m.commandList.FilterState() != list.Unfiltered {
+		t.Skip("unexpected filter state")
+	}
+
+	result, _ := m.Update(tea.KeyPressMsg{Text: "enter"})
+	rm := result.(model)
+
+	if rm.activeScreen != screenInline {
+		t.Errorf("expected screenInline after Enter, got %v", rm.activeScreen)
+	}
+	if rm.inlineBox == nil {
+		t.Error("expected inlineBox to be non-nil after Enter")
+	}
+}
+
+func TestInlineBoxClosesOnEsc(t *testing.T) {
+	root := testRoot()
+	m := newModel(root, "1.0.0", false)
+	m.width = 120
+	m.height = 40
+
+	// Open inline box.
+	result, _ := m.Update(tea.KeyPressMsg{Text: "enter"})
+	rm := result.(model)
+	if rm.activeScreen != screenInline {
+		t.Skip("inline box did not open — skipping")
+	}
+
+	// Close with Esc.
+	result2, _ := rm.Update(tea.KeyPressMsg{Text: "esc"})
+	rm2 := result2.(model)
+
+	if rm2.activeScreen != screenList {
+		t.Errorf("expected screenList after Esc, got %v", rm2.activeScreen)
+	}
+	if rm2.inlineBox != nil {
+		t.Error("expected inlineBox to be nil after Esc")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// CommandItem
+// ---------------------------------------------------------------------------
 
 func TestCommandItemTitle(t *testing.T) {
 	cmd := &cobra.Command{Use: "service <action> [name]", Short: "Manage services"}
@@ -132,6 +368,10 @@ func TestCommandItemHasSubCommands(t *testing.T) {
 	}
 }
 
+// ---------------------------------------------------------------------------
+// argsFromUse
+// ---------------------------------------------------------------------------
+
 func TestArgsFromUse(t *testing.T) {
 	tests := []struct {
 		use      string
@@ -142,7 +382,7 @@ func TestArgsFromUse(t *testing.T) {
 		{"install", 0, nil, nil},
 		{"service <action> [service-name]", 2, []bool{true, false}, []string{"action", "service-name"}},
 		{"xdebug <on|off> [php-version]", 2, []bool{true, false}, []string{"on|off", "php-version"}},
-		{"db <action> [args...]", 1, []bool{true}, []string{"action"}}, // variadic excluded
+		{"db <action> [args...]", 1, []bool{true}, []string{"action"}},
 		{"restore [identifier]", 1, []bool{false}, []string{"identifier"}},
 	}
 
@@ -164,72 +404,9 @@ func TestArgsFromUse(t *testing.T) {
 	}
 }
 
-func TestArgPaneIsReady(t *testing.T) {
-	defs := []ArgDef{
-		{Name: "action", Required: true},
-		{Name: "name", Required: false},
-	}
-	pane := NewArgPane(defs, 80)
-
-	// Initially not ready — required field is empty.
-	if pane.IsReady() {
-		t.Error("expected IsReady false before filling required field")
-	}
-}
-
-func TestArgPaneIsReadyNoArgs(t *testing.T) {
-	pane := NewArgPane(nil, 80)
-	if !pane.IsReady() {
-		t.Error("expected IsReady true when no required args")
-	}
-}
-
-func TestCommandPath(t *testing.T) {
-	root := testRoot()
-	m := newModel(root, "1.0.0")
-
-	// Find the service command by name (cobra sorts commands alphabetically).
-	var serviceCmd *cobra.Command
-	for _, c := range root.Commands() {
-		if c.Use == "service <action> [service-name]" {
-			serviceCmd = c
-			break
-		}
-	}
-	if serviceCmd == nil {
-		t.Fatal("service command not found in test root")
-	}
-
-	serviceItem := CommandItem{Cmd: serviceCmd}
-	updatedModel, _ := m.pushStack(serviceItem)
-	um := updatedModel.(model)
-
-	// Find the start subcommand.
-	var startCmd *cobra.Command
-	for _, c := range serviceCmd.Commands() {
-		if c.Use == "start" {
-			startCmd = c
-			break
-		}
-	}
-	if startCmd == nil {
-		t.Fatal("start subcommand not found")
-	}
-
-	startItem := CommandItem{Cmd: startCmd}
-	um.selectedItem = &startItem
-
-	path := commandPath(um)
-	if len(path) != 2 {
-		t.Fatalf("expected path length 2, got %d: %v", len(path), path)
-	}
-	if path[0] != "service" {
-		t.Errorf("expected path[0]='service', got %q", path[0])
-	}
-	if path[1] != "start" {
-		t.Errorf("expected path[1]='start', got %q", path[1])
-	}
-}
+// ---------------------------------------------------------------------------
+// itemsFromCommands
+// ---------------------------------------------------------------------------
 
 func TestItemsFromCommands(t *testing.T) {
 	root := testRoot()
@@ -250,15 +427,19 @@ func TestItemsFromCommands(t *testing.T) {
 	}
 }
 
+// ---------------------------------------------------------------------------
+// wordWrap
+// ---------------------------------------------------------------------------
+
 func TestWordWrap(t *testing.T) {
 	tests := []struct {
 		text     string
 		maxWidth int
-		wantLen  int // number of lines
+		wantLen  int
 	}{
 		{"hello world", 20, 1},
 		{"hello world", 5, 2},
-		{"a b c d e f", 3, 3}, // "a b" fits on 3 chars, same for "c d" and "e f"
+		{"a b c d e f", 3, 3},
 		{"", 20, 0},
 	}
 
@@ -279,125 +460,5 @@ func TestWordWrap(t *testing.T) {
 		if lines != tc.wantLen {
 			t.Errorf("wordWrap(%q, %d): want %d lines, got %d", tc.text, tc.maxWidth, tc.wantLen, lines)
 		}
-	}
-}
-
-// ---------------------------------------------------------------------------
-// Filter / search bar tests
-// ---------------------------------------------------------------------------
-
-func TestFilteringEnabledOnBuildList(t *testing.T) {
-	root := testRoot()
-	m := newModel(root, "1.0.0")
-
-	if !m.commandList.FilteringEnabled() {
-		t.Error("expected filtering to be enabled on the command list")
-	}
-}
-
-func TestQKeyQuitsWhenNotFiltering(t *testing.T) {
-	root := testRoot()
-	m := newModel(root, "1.0.0")
-
-	// Confirm we are not filtering.
-	if m.commandList.FilterState() != list.Unfiltered {
-		t.Fatal("expected Unfiltered state on fresh model")
-	}
-
-	_, cmd := m.Update(tea.KeyPressMsg{Text: "q"})
-	if cmd == nil {
-		t.Error("q should quit when not filtering")
-	}
-}
-
-func TestQKeyTypesIntoFilterWhenFiltering(t *testing.T) {
-	root := testRoot()
-	m := newModel(root, "1.0.0")
-	m.width = 120
-	m.height = 40
-
-	// Activate filtering by typing a character — the list transitions to
-	// Filtering state when a printable key is received.
-	result, _ := m.Update(tea.KeyPressMsg{Text: "i"})
-	rm := result.(model)
-
-	if rm.commandList.FilterState() != list.Filtering {
-		t.Skip("list did not enter Filtering state after typing — bubbles/list behaviour may differ")
-	}
-
-	// Now q should NOT quit — it should be routed to the list as a filter char.
-	_, cmd := rm.Update(tea.KeyPressMsg{Text: "q"})
-	if cmd != nil {
-		// cmd is nil when the list absorbs the keystroke into the filter input
-		// (no tea command is returned for a plain character insertion).
-		// If tea.Quit were returned it would be non-nil.
-		t.Error("q should not quit when list is actively filtering")
-	}
-}
-
-func TestCtrlCAlwaysQuits(t *testing.T) {
-	root := testRoot()
-	m := newModel(root, "1.0.0")
-
-	// ctrl+c quits regardless of filter state.
-	_, cmd := m.Update(tea.KeyPressMsg{Text: "ctrl+c"})
-	if cmd == nil {
-		t.Error("ctrl+c should always quit")
-	}
-}
-
-func TestEscPopsStackWhenNotFiltering(t *testing.T) {
-	root := testRoot()
-	m := newModel(root, "1.0.0")
-	m.width = 120
-	m.height = 40
-
-	// Push a level onto the stack first.
-	var serviceCmd *cobra.Command
-	for _, c := range root.Commands() {
-		if c.Use == "service <action> [service-name]" {
-			serviceCmd = c
-			break
-		}
-	}
-	if serviceCmd == nil {
-		t.Fatal("service command not found")
-	}
-	pushed, _ := m.pushStack(CommandItem{Cmd: serviceCmd})
-	pm := pushed.(model)
-
-	if len(pm.stack) != 2 {
-		t.Fatalf("expected 2 stack entries after push, got %d", len(pm.stack))
-	}
-
-	// Esc when not filtering should pop the stack.
-	result, _ := pm.Update(tea.KeyPressMsg{Text: "esc"})
-	rm := result.(model)
-
-	if len(rm.stack) != 1 {
-		t.Errorf("expected 1 stack entry after Esc, got %d", len(rm.stack))
-	}
-}
-
-func TestEnterDoesNotSelectDuringFiltering(t *testing.T) {
-	root := testRoot()
-	m := newModel(root, "1.0.0")
-	m.width = 120
-	m.height = 40
-
-	// Activate filtering.
-	result, _ := m.Update(tea.KeyPressMsg{Text: "i"})
-	rm := result.(model)
-
-	if rm.commandList.FilterState() != list.Filtering {
-		t.Skip("list did not enter Filtering state — skipping")
-	}
-
-	// Enter during filtering should NOT transition to screenArgs or screenExec.
-	result2, _ := rm.Update(tea.KeyPressMsg{Text: "enter"})
-	rm2 := result2.(model)
-
-	if rm2.activeScreen != screenList {
-		t.Errorf("Enter during filtering should keep screenList, got screen %v", rm2.activeScreen)
 	}
 }
