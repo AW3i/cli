@@ -22,135 +22,115 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 	"github.com/spf13/cobra"
-	"github.com/valet-sh/cli/internal/ansible"
 )
 
-// screen tracks which state the launcher is in.
+// screen tracks which pane has keyboard focus.
 type screen int
 
 const (
-	screenList     screen = iota // navigating the horizontal command bar
-	screenInline                 // inline box open (arg input + docs)
-	screenPassword               // sudo password prompt shown before exec
-	screenExec                   // ansible is running, exec panel shown
+	screenList screen = iota // navigating the command list
+	screenArgs               // filling in argument fields
 )
 
-// stackEntry records a navigation level so we can Esc back.
+// stackEntry records a navigation level so we can pop back with Esc.
 type stackEntry struct {
 	list  list.Model
-	title string // breadcrumb label for this level, e.g. "service"
+	title string // breadcrumb label for this level
 }
 
 // model is the root Bubble Tea model for the valet-sh launcher.
-// Elm architecture requires value receivers — do not use pointer receivers.
+// The Elm-architecture requires value receivers — do not use pointer receivers.
 type model struct {
-	// root cobra command — used only to read command metadata.
+	// cobra root command — used only to read command metadata.
 	root *cobra.Command
 
 	// version string shown in the header.
 	version string
 
-	// vimMode enables hjkl navigation when true.
-	// Toggled by ctrl+[.
-	vimMode bool
-
-	// Navigation stack. stack[0] is always the root menu.
+	// Navigation stack. stack[0] is always the root menu. The current menu
+	// is always stack[len(stack)-1].
 	stack []stackEntry
 
-	// commandList is the bubbles/list model for the current level.
-	// Used for keyboard input handling (navigation, filtering) even though
-	// the display uses renderHorizontalList() instead of commandList.View().
-	commandList list.Model
+	// current is an alias for the top of the stack (kept in sync).
+	current list.Model
 
-	// inlineBox is the unified arg-input + docs box shown when a command
-	// with arguments (or any command, for previewing) is selected.
-	inlineBox *InlineBox
+	// argPane is shown when a command with arguments is selected.
+	argPane ArgPane
 
-	// passwordBox is shown before executing a command that requires sudo.
-	// It is discarded immediately after the password is handed to Ansible.
-	passwordBox *PasswordBox
-
-	// activeScreen controls which component receives keystrokes.
+	// activeScreen controls which pane receives keystrokes.
 	activeScreen screen
 
-	// execModel is the full-width execution panel shown during ansible runs.
-	execModel ExecModel
+	// selectedItem holds the command item the user pressed Enter on.
+	// Non-nil means the TUI is about to quit with a selection.
+	selectedItem *CommandItem
 
-	// totalTasks is the number of tasks that will be executed, determined by
-	// ansible-playbook --list-tasks before the run. Zero means unknown.
-	totalTasks int
-
-	// width/height of the terminal at last WindowSizeMsg.
+	// width/height of the terminal.
 	width  int
 	height int
 }
 
 // Result is returned by Run() after the TUI exits.
 type Result struct {
-	// Args is the argv slice to dispatch, e.g. ["service", "start", "php83"].
-	// Empty means the user cancelled.
+	// Args is the full argv slice to pass to cobra, e.g. ["service", "start", "php83"].
+	// Empty slice means the user cancelled.
 	Args []string
 }
 
 // Run launches the interactive TUI launcher.
-// vimMode starts the launcher with vim-style navigation enabled.
-func Run(root *cobra.Command, version string, vimMode bool) (Result, error) {
-	m := newModel(root, version, vimMode)
+// It takes the cobra root command to introspect subcommands and the version
+// string to display in the header.
+// It returns the selected command + arguments, or an empty Result if cancelled.
+func Run(root *cobra.Command, version string) (Result, error) {
+	m := newModel(root, version)
 	p := tea.NewProgram(m)
 
-	_, err := p.Run()
+	final, err := p.Run()
 	if err != nil {
 		return Result{}, err
 	}
 
-	// Execution is handled internally by transitioning to screenExec.
-	// Result.Args is never populated — we return empty to signal the caller
-	// that no further dispatch is needed.
-	return Result{}, nil
+	fm, ok := final.(model)
+	if !ok || fm.selectedItem == nil {
+		return Result{}, nil
+	}
+
+	// Build argv from selected item + argument pane values.
+	// Walk the navigation stack to build the full command path.
+	args := commandPath(fm)
+	args = append(args, fm.argPane.Values()...)
+
+	return Result{Args: args}, nil
 }
 
-// newModel initialises the launcher model.
-func newModel(root *cobra.Command, version string, vimMode bool) model {
-	rootList := buildList(root.Commands(), false, 80, 10)
+// newModel initialises the TUI model from the cobra root command.
+func newModel(root *cobra.Command, version string) model {
+	rootList := buildList(root.Commands(), false, 80, 20)
 	return model{
-		root:        root,
-		version:     version,
-		vimMode:     vimMode,
-		stack:       []stackEntry{{list: rootList, title: "valet.sh"}},
-		commandList: rootList,
-		width:       80,
-		height:      24,
+		root:    root,
+		version: version,
+		stack:   []stackEntry{{list: rootList, title: "valet.sh"}},
+		current: rootList,
+		width:   80,
+		height:  24,
 	}
 }
 
 // buildList creates a bubbles list.Model from a slice of cobra commands.
-// bubbles/list handles keyboard navigation and filter state; the visual
-// rendering is delegated to renderHorizontalList().
 func buildList(cmds []*cobra.Command, withBack bool, width, height int) list.Model {
 	items := itemsFromCommands(cmds, withBack)
 	delegate := NewCommandDelegate()
 	l := list.New(items, delegate, width, height)
 	l.SetShowTitle(false)
 	l.SetShowStatusBar(false)
-	l.SetFilteringEnabled(true)
+	l.SetFilteringEnabled(false)
 	l.SetShowHelp(false)
 	l.DisableQuitKeybindings()
-
-	// Style the filter input to match the valet-sh palette.
-	l.FilterInput.Prompt = "/ "
-	filterStyles := l.FilterInput.Styles()
-	filterStyles.Focused.Prompt = styles.InputGhostPrompt.Bold(true).Foreground(colourBlue)
-	filterStyles.Focused.Text = styles.InputText
-	filterStyles.Blurred.Prompt = styles.InputGhostPrompt
-	filterStyles.Blurred.Text = styles.ItemDim
-	l.FilterInput.SetStyles(filterStyles)
-
 	return l
 }
 
 // --- Elm Architecture ----------------------------------------------------------
 
-// Init satisfies tea.Model.
+// Init satisfies tea.Model. No I/O needed at startup.
 func (m model) Init() tea.Cmd { return nil }
 
 // Update is the central event handler.
@@ -166,253 +146,108 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.handleKey(msg)
 	}
 
+	// Route all other messages to the active component.
 	return m.routeMsg(msg)
 }
 
-// handleKey routes keyboard input based on active screen and vim mode.
+// handleKey processes keyboard input based on the active screen.
 func (m model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	key := msg.String()
 
-	// ctrl+c always quits.
-	if key == "ctrl+c" {
+	// Global quit — always works.
+	if key == "ctrl+c" || key == "q" {
 		return m, tea.Quit
-	}
-
-	// ctrl+[ toggles vim mode from any screen except exec.
-	if key == "ctrl+[" && m.activeScreen != screenExec {
-		m.vimMode = !m.vimMode
-		return m, nil
 	}
 
 	switch m.activeScreen {
 	case screenList:
-		return m.handleListKey(key, msg)
+		switch key {
+		case "esc":
+			return m.popStack()
+		case "enter":
+			return m.selectItem()
+		}
 
-	case screenInline:
-		return m.handleInlineKey(key, msg)
-
-	case screenPassword:
-		return m.handlePasswordKey(key, msg)
-
-	case screenExec:
+	case screenArgs:
+		switch key {
+		case "esc":
+			// Cancel arg input, return focus to list.
+			m.activeScreen = screenList
+			m.argPane = ArgPane{}
+			return m, nil
+		case "enter":
+			if m.argPane.IsReady() {
+				return m.executeSelection()
+			}
+		}
+		// Route remaining keys to the arg pane.
 		var cmd tea.Cmd
-		m.execModel, cmd = m.execModel.Update(msg)
+		m.argPane, cmd = m.argPane.Update(msg)
 		return m, cmd
 	}
 
-	return m, nil
-}
-
-// handleListKey handles key events on the horizontal command list.
-func (m model) handleListKey(key string, msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
-	// q quits only when not filtering.
-	if key == "q" && m.commandList.FilterState() != list.Filtering {
-		return m, tea.Quit
-	}
-
-	// Navigation — translate to list cursor movements.
-	// Vim mode: h/l/j/k; normal mode: ←/→/↑/↓.
-	switch key {
-	case "left", "up":
-		m.commandList.CursorUp()
-		return m, nil
-	case "right", "down":
-		m.commandList.CursorDown()
-		return m, nil
-	}
-
-	if m.vimMode {
-		switch key {
-		case "h", "k":
-			m.commandList.CursorUp()
-			return m, nil
-		case "l", "j":
-			m.commandList.CursorDown()
-			return m, nil
-		}
-	}
-
-	switch key {
-	case "esc":
-		if m.commandList.FilterState() == list.Filtering {
-			// Let list handle Esc to clear filter.
-		} else {
-			return m.popStack()
-		}
-	case "enter":
-		if m.commandList.FilterState() != list.Filtering {
-			return m.selectItem()
-		}
-	}
-
-	// Forward remaining keys to the list (handles filter input).
+	// Forward to the list.
 	var cmd tea.Cmd
-	m.commandList, cmd = m.commandList.Update(msg)
-	m.stack[len(m.stack)-1].list = m.commandList
+	m.current, cmd = m.current.Update(msg)
+	m.stack[len(m.stack)-1].list = m.current
 	return m, cmd
 }
 
-// handleInlineKey handles key events when the inline box is open.
-func (m model) handleInlineKey(key string, msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
-	switch key {
-	case "esc":
-		// Close inline box, return to list.
-		m.inlineBox = nil
-		m.activeScreen = screenList
-		return m, nil
-
-	case "enter":
-		// Transition to the password screen before executing.
-		return m.openPasswordScreen()
-	}
-
-	// Route to inline box for doc scrolling and text input.
-	if m.inlineBox != nil {
-		var cmd tea.Cmd
-		updated, cmd := m.inlineBox.Update(msg)
-		m.inlineBox = &updated
-		return m, cmd
-	}
-
-	return m, nil
-}
-
-// openPasswordScreen transitions to screenPassword before executing a command.
-// It also pre-parses the playbook with --list-tasks to count total tasks
-// for the progress bar.
-func (m model) openPasswordScreen() (tea.Model, tea.Cmd) {
-	if m.inlineBox == nil {
-		return m, nil
-	}
-
-	// Build the command string for the password box header.
-	commandStr := m.commandPathFromStack()
-	if val := m.inlineBox.Value(); val != "" {
-		commandStr += " " + val
-	}
-
-	// Using spinner for progress instead of progress bar.
-	m.totalTasks = 0
-
-	box := NewPasswordBox(commandStr, m.width)
-	m.passwordBox = &box
-	m.activeScreen = screenPassword
-	return m, nil
-}
-
-// handlePasswordKey handles key events on the password screen.
-func (m model) handlePasswordKey(key string, msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
-	switch key {
-	case "esc":
-		// Cancel — return to inline box.
-		m.passwordBox = nil
-		m.activeScreen = screenInline
-		return m, nil
-
-	case "enter":
-		if m.passwordBox != nil && m.passwordBox.IsEmpty() {
-			// Show inline error — don't execute with an empty password.
-			m.passwordBox.MarkEmptyError()
-			return m, nil
-		}
-		return m.executeWithPassword()
-	}
-
-	if m.passwordBox != nil {
-		var cmd tea.Cmd
-		updated, cmd := m.passwordBox.Update(msg)
-		m.passwordBox = &updated
-		return m, cmd
-	}
-
-	return m, nil
-}
-
-// selectItem handles Enter on the command list.
+// selectItem is called when the user presses Enter on a list item.
 func (m model) selectItem() (tea.Model, tea.Cmd) {
-	sel, ok := m.commandList.SelectedItem().(CommandItem)
+	sel, ok := m.current.SelectedItem().(CommandItem)
 	if !ok {
 		return m, nil
 	}
 
+	// "← back" item.
 	if sel.IsBack {
 		return m.popStack()
 	}
 
+	// Command with subcommands → drill into submenu.
 	if sel.HasSubCommands() {
 		return m.pushStack(sel)
 	}
 
-	// Open the inline box — always, so user can review docs and type args.
-	path := m.fullCommandPath(sel.Title())
-	docs := sel.LongDescription()
-	box := NewInlineBox(path, docs, m.inlineBoxWidth())
-	m.inlineBox = &box
-	m.activeScreen = screenInline
-	return m, nil
-}
-
-// argsFromInlineBox builds the argv slice from the current command path
-// and whatever the user typed into the inline box.
-func (m model) argsFromInlineBox() []string {
-	if m.inlineBox == nil {
-		return strings.Fields(m.commandPathFromStack())
-	}
-	args := strings.Fields(m.commandPathFromStack())
-	if rawInput := m.inlineBox.Value(); rawInput != "" {
-		args = append(args, strings.Fields(rawInput)...)
-	}
-	return args
-}
-
-// executeWithPassword collects the password from the password screen,
-// then starts the ansible subprocess with it.
-func (m model) executeWithPassword() (tea.Model, tea.Cmd) {
-	if m.inlineBox == nil {
+	// Leaf command with required/optional args → show arg pane.
+	defs := sel.Args()
+	if len(defs) > 0 {
+		m.argPane = NewArgPane(defs, m.width)
+		m.selectedItem = &sel
+		m.activeScreen = screenArgs
 		return m, nil
 	}
 
-	args := m.argsFromInlineBox()
-	opts, err := resolveRunOpts(m.root, args)
-	if err != nil {
-		return m, tea.Quit
-	}
+	// Leaf command with no args → execute immediately.
+	m.selectedItem = &sel
+	return m, tea.Quit
+}
 
-	// Take the password and attach it to opts. The password slice is zeroed
-	// inside RunSubprocess() immediately after being written to the env.
-	if m.passwordBox != nil {
-		opts.BecomePassword = m.passwordBox.TakePassword()
-		m.passwordBox = nil
-	}
-
-	proc, ansibleOut, cleanup, err := ansible.RunSubprocess(opts)
-	if err != nil {
-		return m, tea.Quit
-	}
-
-	commandStr := strings.Join(args, " ")
-	m.execModel = NewExecModel(commandStr, m.version, true, proc, ansibleOut, cleanup, m.totalTasks, m.width, m.height)
-	m.activeScreen = screenExec
-	m.inlineBox = nil
-
-	return m, m.execModel.Init()
+// executeSelection is called from screenArgs when the user confirms args.
+func (m model) executeSelection() (tea.Model, tea.Cmd) {
+	return m, tea.Quit
 }
 
 // pushStack navigates into a submenu.
 func (m model) pushStack(sel CommandItem) (tea.Model, tea.Cmd) {
-	subList := buildList(sel.Cmd.Commands(), true, m.width, 10)
-	m.stack = append(m.stack, stackEntry{list: subList, title: sel.Title()})
-	m.commandList = subList
+	subList := buildList(sel.Cmd.Commands(), true, m.listWidth(), m.listHeight())
+	entry := stackEntry{
+		list:  subList,
+		title: sel.Title(),
+	}
+	m.stack = append(m.stack, entry)
+	m.current = subList
 	return m, nil
 }
 
-// popStack navigates back up one level, or quits at the root.
+// popStack navigates back up one level, or quits if already at root.
 func (m model) popStack() (tea.Model, tea.Cmd) {
 	if len(m.stack) <= 1 {
 		return m, tea.Quit
 	}
 	m.stack = m.stack[:len(m.stack)-1]
-	m.commandList = m.stack[len(m.stack)-1].list
+	m.current = m.stack[len(m.stack)-1].list
 	return m, nil
 }
 
@@ -420,34 +255,31 @@ func (m model) popStack() (tea.Model, tea.Cmd) {
 func (m model) routeMsg(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmd tea.Cmd
 	switch m.activeScreen {
-	case screenInline:
-		if m.inlineBox != nil {
-			updated, c := m.inlineBox.Update(msg)
-			m.inlineBox = &updated
-			cmd = c
-		}
-	case screenPassword:
-		if m.passwordBox != nil {
-			updated, c := m.passwordBox.Update(msg)
-			m.passwordBox = &updated
-			cmd = c
-		}
-	case screenExec:
-		m.execModel, cmd = m.execModel.Update(msg)
+	case screenArgs:
+		m.argPane, cmd = m.argPane.Update(msg)
 	default:
-		m.commandList, cmd = m.commandList.Update(msg)
-		m.stack[len(m.stack)-1].list = m.commandList
+		m.current, cmd = m.current.Update(msg)
+		m.stack[len(m.stack)-1].list = m.current
 	}
 	return m, cmd
 }
 
-// resizeAll updates all components after a terminal resize.
+// resizeAll updates the sizes of all layout components after a terminal resize.
 func (m model) resizeAll() model {
-	m.commandList.SetSize(m.width, 10)
-	m.stack[len(m.stack)-1].list = m.commandList
+	lw, lh := m.listWidth(), m.listHeight()
 
-	if m.activeScreen == screenExec {
-		m.execModel = m.execModel.SetSize(m.width, m.height)
+	// Resize every list in the stack.
+	for i := range m.stack {
+		m.stack[i].list.SetSize(lw, lh)
+	}
+	m.current = m.stack[len(m.stack)-1].list
+
+	// Resize arg pane if visible.
+	if m.activeScreen == screenArgs && !m.argPane.IsEmpty() {
+		m.argPane.width = m.width
+		for j := range m.argPane.inputs {
+			m.argPane.inputs[j].SetWidth(m.width/2 - 4)
+		}
 	}
 
 	return m
@@ -455,51 +287,34 @@ func (m model) resizeAll() model {
 
 // --- View -----------------------------------------------------------------------
 
-// View renders the full TUI.
-// No alt-screen — renders inline below the cursor like fzf.
+// View renders the full TUI to a tea.View.
 func (m model) View() tea.View {
 	v := tea.NewView(m.render())
-	v.MouseMode = tea.MouseModeCellMotion
+	v.AltScreen = true
 	return v
 }
 
 func (m model) render() string {
-	if m.activeScreen == screenExec {
-		return m.execModel.View()
+	var sb strings.Builder
+
+	// Header
+	_, _ = fmt.Fprintln(&sb, m.headerView())
+	_, _ = fmt.Fprintln(&sb)
+
+	// Two-pane layout (list left, description right) or arg pane below list.
+	if m.activeScreen == screenArgs {
+		_, _ = fmt.Fprintln(&sb, m.listAndDescView())
+		_, _ = fmt.Fprintln(&sb, dividerLine(m.width))
+		_, _ = fmt.Fprintln(&sb, m.argPane.View())
+	} else {
+		_, _ = fmt.Fprintln(&sb, m.listAndDescView())
 	}
 
-	var output strings.Builder
+	// Help bar.
+	_, _ = fmt.Fprintln(&sb)
+	_, _ = fmt.Fprintln(&sb, renderHelpBar(m.width))
 
-	_, _ = fmt.Fprintln(&output, m.headerView())
-	_, _ = fmt.Fprintln(&output, dividerLine(m.width))
-
-	switch {
-	case m.activeScreen == screenPassword && m.passwordBox != nil:
-		// Focused password screen: hide command list, show only password input
-		_, _ = fmt.Fprintln(&output, "  "+m.passwordBox.InputView())
-		_, _ = fmt.Fprintln(&output, dividerLine(m.width))
-		_, _ = fmt.Fprint(&output,
-			styles.HelpKey.Render("↵")+styles.HelpDesc.Render(" confirm")+" · "+
-				styles.HelpKey.Render("esc")+styles.HelpDesc.Render(" back")+" · "+
-				m.passwordBox.View(),
-		)
-	case m.activeScreen == screenInline && m.inlineBox != nil:
-		_, _ = fmt.Fprintln(&output, renderHorizontalList(m.commandList, m.width))
-		_, _ = fmt.Fprintln(&output, m.inlineBox.View())
-		_, _ = fmt.Fprintln(&output, dividerLine(m.width))
-		_, _ = fmt.Fprint(&output, renderInlineHelpBar(m.width))
-	default:
-		// Show command list for screenList
-		_, _ = fmt.Fprintln(&output, renderHorizontalList(m.commandList, m.width))
-		// Show filter input line when actively filtering.
-		if m.commandList.FilterState() == list.Filtering {
-			_, _ = fmt.Fprintln(&output, "  "+m.commandList.FilterInput.View())
-		}
-		_, _ = fmt.Fprintln(&output, dividerLine(m.width))
-		_, _ = fmt.Fprint(&output, renderHelpBar(m.vimMode, m.width))
-	}
-
-	return output.String()
+	return sb.String()
 }
 
 func (m model) headerView() string {
@@ -509,79 +324,93 @@ func (m model) headerView() string {
 	}
 	breadcrumb := strings.Join(crumbs, " › ")
 
-	// For screenPassword, extend the breadcrumb to include the full command args.
-	// e.g., "valet.sh › service › restart nginx"
-	if m.activeScreen == screenPassword && m.passwordBox != nil {
-		breadcrumb = breadcrumb + " › " + m.passwordBox.command
-	}
-
 	title := styles.Header.Render("▶ " + breadcrumb)
+	version := styles.Version.Render("v" + m.version)
 
-	// Right side of the title — changes based on state:
-	// - screenInline:   show the live textinput ("valet.sh db █")
-	// - screenList:     show dim ghost text of the hovered command
-	var titleSuffix string
-	switch m.activeScreen {
-	case screenInline:
-		if m.inlineBox != nil {
-			titleSuffix = "  " + m.inlineBox.InputView()
-		}
-	case screenList:
-		if sel, ok := m.commandList.SelectedItem().(CommandItem); ok && !sel.IsBack {
-			titleSuffix = "  " + styles.GhostCommand.Render(sel.Title())
-		}
+	// Pad version to the right edge.
+	titleLen := lipgloss.Width(title)
+	versionLen := lipgloss.Width(version)
+	pad := m.width - titleLen - versionLen - 2
+	if pad < 1 {
+		pad = 1
 	}
 
-	// Right side: [VIM] indicator (if active) · version.
-	vimIndicator := ""
-	if m.vimMode {
-		vimIndicator = styles.VimModeIndicator.Render("[VIM]") + "  "
-	}
-	versionLabel := styles.Version.Render("v" + m.version)
-	right := vimIndicator + versionLabel
+	return title + strings.Repeat(" ", pad) + version
+}
 
-	// Pad to right edge.
-	leftLen := lipgloss.Width(title) + lipgloss.Width(titleSuffix)
-	rightLen := lipgloss.Width(right)
-	versionPadding := m.width - leftLen - rightLen - 1
-	if versionPadding < 1 {
-		versionPadding = 1
+func (m model) listAndDescView() string {
+	lw := m.listWidth()
+	rw := m.descWidth()
+
+	leftContent := m.current.View()
+	left := styles.LeftPane.Width(lw).Render(leftContent)
+
+	rightContent := m.descriptionView()
+	right := styles.RightPane.Width(rw).Render(rightContent)
+
+	divider := styles.Divider.Render(strings.Repeat("│", m.listHeight()))
+
+	return lipgloss.JoinHorizontal(lipgloss.Top, left, divider, right)
+}
+
+func (m model) descriptionView() string {
+	sel, ok := m.current.SelectedItem().(CommandItem)
+	if !ok || sel.IsBack {
+		return styles.DescBody.Render("Select a command to see its description.")
 	}
 
-	return title + titleSuffix + strings.Repeat(" ", versionPadding) + right
+	var sb strings.Builder
+
+	// Command name as title.
+	title := sel.Title()
+	if sel.HasSubCommands() {
+		title += " ›"
+	}
+	_, _ = fmt.Fprintln(&sb, styles.DescTitle.Render(title))
+
+	// Full description.
+	desc := sel.LongDescription()
+	wrapped := wordWrap(desc, m.descWidth()-4)
+	_, _ = fmt.Fprintln(&sb, styles.DescBody.Render(wrapped))
+
+	return sb.String()
 }
 
 // --- Layout helpers -------------------------------------------------------------
 
+const (
+	leftPaneFraction = 0.38
+	minLeftPaneWidth = 22
+	headerHeight     = 3 // header + blank line + divider
+	helpBarHeight    = 2 // blank line + help bar
+	argPaneMaxHeight = 8
+)
+
+func (m model) listWidth() int {
+	w := int(float64(m.width) * leftPaneFraction)
+	if w < minLeftPaneWidth {
+		w = minLeftPaneWidth
+	}
+	return w
+}
+
+func (m model) descWidth() int {
+	return m.width - m.listWidth() - 3 // 3 for divider + padding
+}
+
+func (m model) listHeight() int {
+	h := m.height - headerHeight - helpBarHeight - 2
+	if m.activeScreen == screenArgs {
+		h -= argPaneMaxHeight
+	}
+	if h < 4 {
+		h = 4
+	}
+	return h
+}
+
 func dividerLine(width int) string {
 	return strings.Repeat("─", width)
-}
-
-// inlineBoxWidth returns the width for the inline box — full terminal width.
-func (m model) inlineBoxWidth() int {
-	return m.width
-}
-
-// fullCommandPath returns the full command path for the given leaf name,
-// including any submenu breadcrumbs from the navigation stack.
-// e.g. if stack is [valet.sh, project] and leaf is "env" → "project env".
-func (m model) fullCommandPath(leafName string) string {
-	var parts []string
-	for i := range m.stack[1:] {
-		parts = append(parts, m.stack[i+1].title)
-	}
-	parts = append(parts, leafName)
-	return strings.Join(parts, " ")
-}
-
-// commandPathFromStack returns the current command path from the stack
-// (excluding root) as a space-separated string, used to build ansible args.
-func (m model) commandPathFromStack() string {
-	sel, ok := m.commandList.SelectedItem().(CommandItem)
-	if !ok {
-		return ""
-	}
-	return m.fullCommandPath(sel.Title())
 }
 
 // wordWrap breaks text at word boundaries to fit within maxWidth columns.
@@ -610,4 +439,20 @@ func wordWrap(text string, maxWidth int) string {
 		lines = append(lines, current.String())
 	}
 	return strings.Join(lines, "\n")
+}
+
+// commandPath walks the navigation stack to reconstruct the full command path
+// for the selected item (e.g. ["project", "env"] or ["service"]).
+func commandPath(m model) []string {
+	if m.selectedItem == nil {
+		return nil
+	}
+
+	// Walk the stack breadcrumbs (skip root entry at index 0 which is "valet.sh").
+	var path []string
+	for i := range m.stack[1:] {
+		path = append(path, m.stack[i+1].title)
+	}
+	path = append(path, m.selectedItem.Title())
+	return path
 }

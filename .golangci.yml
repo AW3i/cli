@@ -126,12 +126,19 @@ issues:
     - path: internal/commands/help.go
       linters:
         - errcheck
-    - path: internal/commands/helpers.go  
+    - path: internal/commands/helpers.go
       linters:
         - errcheck
     - path: internal/updater/check.go
       linters:
         - errcheck
+    # Bubble Tea requires value receivers on the model type — the Elm architecture
+    # mandates that Update returns a new model copy, not a mutated pointer.
+    # The hugeParam warning is expected and correct by design.
+    - path: internal/tui/launcher.go
+      text: "hugeParam"
+      linters:
+        - gocritic
   exclude-use-default: false
   max-issues-per-linter: 0
   max-same-issues: 0
