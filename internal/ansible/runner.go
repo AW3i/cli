@@ -191,12 +191,13 @@ func RunSubprocess(opts *RunOpts) (*exec.Cmd, error) {
 	env := os.Environ()
 	env = setEnv(env, "OLDPWD", workDir)
 
-	// If a become password was provided, set it as an env var and immediately
-	// zero the slice so the password does not linger in the Go heap.
-	// The env var is visible in /proc/<pid>/environ briefly — the same
-	// window as any sudo invocation, and an accepted trade-off.
+	// If a become password was provided, pass it via the env var Ansible reads.
+	// Correct name is ANSIBLE_BECOME_PASS (confirmed: ansible/plugins/become/sudo.py).
+	// The slice is zeroed immediately after use so the password does not linger.
+	// Note: stdin is NOT passed through — Bubble Tea owns stdin during TUI execution.
+	// The password must always be supplied via this env var when running from the TUI.
 	if len(opts.BecomePassword) > 0 {
-		env = setEnv(env, "ANSIBLE_BECOME_PASSWORD", string(opts.BecomePassword))
+		env = setEnv(env, "ANSIBLE_BECOME_PASS", string(opts.BecomePassword))
 		for i := range opts.BecomePassword {
 			opts.BecomePassword[i] = 0
 		}
@@ -205,9 +206,7 @@ func RunSubprocess(opts *RunOpts) (*exec.Cmd, error) {
 	cmd := exec.Command(ansibleBin, args...)
 	cmd.Dir = repoDir
 	cmd.Env = env
-	// Pass stdin through so interactive prompts (including sudo password
-	// prompts) reach the terminal when no become password was pre-supplied.
-	cmd.Stdin = os.Stdin
+	// Do NOT set cmd.Stdin — Bubble Tea owns stdin during TUI execution.
 	// Discard stdout/stderr — all output goes to the log file via the callback.
 	cmd.Stdout = nil
 	cmd.Stderr = nil

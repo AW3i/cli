@@ -298,10 +298,11 @@ func (m model) handlePasswordKey(key string, msg tea.KeyPressMsg) (tea.Model, te
 		return m, nil
 
 	case "enter":
-		if m.passwordBox != nil && !m.passwordBox.IsEmpty() {
-			return m.executeWithPassword()
+		if m.passwordBox != nil && m.passwordBox.IsEmpty() {
+			// Show inline error — don't execute with an empty password.
+			m.passwordBox.MarkEmptyError()
+			return m, nil
 		}
-		// Allow executing with empty password (some systems have NOPASSWD).
 		return m.executeWithPassword()
 	}
 
