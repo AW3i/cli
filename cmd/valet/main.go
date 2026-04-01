@@ -20,6 +20,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/valet-sh/cli/internal/commands"
+	"github.com/valet-sh/cli/internal/tui"
 	"github.com/valet-sh/cli/internal/updater"
 )
 
@@ -35,6 +36,25 @@ func main() {
 	}
 
 	root := newRootCmd()
+
+	// When no arguments are given, launch the interactive TUI launcher instead
+	// of printing static help. The TUI returns the selected command + any
+	// arguments filled in by the user. We then inject those into os.Args and
+	// let cobra dispatch normally — no special casing needed further down.
+	if len(os.Args) == 1 {
+		result, err := tui.Run(root, Version)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "TUI error: %v\n", err)
+			os.Exit(1)
+		}
+		if len(result.Args) == 0 {
+			// User cancelled the TUI.
+			os.Exit(0)
+		}
+		// Prepend binary name and let cobra handle the rest.
+		os.Args = append([]string{os.Args[0]}, result.Args...)
+	}
+
 	if err := root.Execute(); err != nil {
 		// cobra already prints the error; just exit non-zero.
 		os.Exit(1)
