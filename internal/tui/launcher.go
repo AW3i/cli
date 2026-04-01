@@ -53,8 +53,8 @@ type model struct {
 	// is always stack[len(stack)-1].
 	stack []stackEntry
 
-	// current is an alias for the top of the stack (kept in sync).
-	current list.Model
+	// commandList is the currently visible list — the top of the navigation stack.
+	commandList list.Model
 
 	// argPane is shown when a command with arguments is selected.
 	argPane ArgPane
@@ -111,12 +111,12 @@ func Run(root *cobra.Command, version string) (Result, error) {
 func newModel(root *cobra.Command, version string) model {
 	rootList := buildList(root.Commands(), false, 80, 20)
 	return model{
-		root:    root,
-		version: version,
-		stack:   []stackEntry{{list: rootList, title: "valet.sh"}},
-		current: rootList,
-		width:   80,
-		height:  24,
+		root:        root,
+		version:     version,
+		stack:       []stackEntry{{list: rootList, title: "valet.sh"}},
+		commandList: rootList,
+		width:       80,
+		height:      24,
 	}
 }
 
@@ -200,14 +200,14 @@ func (m model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 
 	// Forward to the list.
 	var cmd tea.Cmd
-	m.current, cmd = m.current.Update(msg)
-	m.stack[len(m.stack)-1].list = m.current
+	m.commandList, cmd = m.commandList.Update(msg)
+	m.stack[len(m.stack)-1].list = m.commandList
 	return m, cmd
 }
 
 // selectItem is called when the user presses Enter on a list item.
 func (m model) selectItem() (tea.Model, tea.Cmd) {
-	sel, ok := m.current.SelectedItem().(CommandItem)
+	sel, ok := m.commandList.SelectedItem().(CommandItem)
 	if !ok {
 		return m, nil
 	}
@@ -282,7 +282,7 @@ func (m model) pushStack(sel CommandItem) (tea.Model, tea.Cmd) {
 		title: sel.Title(),
 	}
 	m.stack = append(m.stack, entry)
-	m.current = subList
+	m.commandList = subList
 	return m, nil
 }
 
@@ -292,7 +292,7 @@ func (m model) popStack() (tea.Model, tea.Cmd) {
 		return m, tea.Quit
 	}
 	m.stack = m.stack[:len(m.stack)-1]
-	m.current = m.stack[len(m.stack)-1].list
+	m.commandList = m.stack[len(m.stack)-1].list
 	return m, nil
 }
 
@@ -305,21 +305,21 @@ func (m model) routeMsg(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case screenExec:
 		m.execModel, cmd = m.execModel.Update(msg)
 	default:
-		m.current, cmd = m.current.Update(msg)
-		m.stack[len(m.stack)-1].list = m.current
+		m.commandList, cmd = m.commandList.Update(msg)
+		m.stack[len(m.stack)-1].list = m.commandList
 	}
 	return m, cmd
 }
 
 // resizeAll updates the sizes of all layout components after a terminal resize.
 func (m model) resizeAll() model {
-	lw, lh := m.listWidth(), m.listHeight()
+	listWidth, listHeight := m.listWidth(), m.listHeight()
 
 	// Resize every list in the stack.
 	for i := range m.stack {
-		m.stack[i].list.SetSize(lw, lh)
+		m.stack[i].list.SetSize(listWidth, listHeight)
 	}
-	m.current = m.stack[len(m.stack)-1].list
+	m.commandList = m.stack[len(m.stack)-1].list
 
 	// Resize arg pane if visible.
 	if m.activeScreen == screenArgs && !m.argPane.IsEmpty() {
@@ -352,42 +352,40 @@ func (m model) render() string {
 		return m.execScreenView()
 	}
 
-	var sb strings.Builder
+	var output strings.Builder
 
 	// Header
-	_, _ = fmt.Fprintln(&sb, m.headerView())
-	_, _ = fmt.Fprintln(&sb)
+	_, _ = fmt.Fprintln(&output, m.headerView())
+	_, _ = fmt.Fprintln(&output)
 
 	// Two-pane layout (list left, description right) or arg pane below list.
 	if m.activeScreen == screenArgs {
-		_, _ = fmt.Fprintln(&sb, m.listAndDescView())
-		_, _ = fmt.Fprintln(&sb, dividerLine(m.width))
-		_, _ = fmt.Fprintln(&sb, m.argPane.View())
+		_, _ = fmt.Fprintln(&output, m.listAndDescView())
+		_, _ = fmt.Fprintln(&output, dividerLine(m.width))
+		_, _ = fmt.Fprintln(&output, m.argPane.View())
 	} else {
-		_, _ = fmt.Fprintln(&sb, m.listAndDescView())
+		_, _ = fmt.Fprintln(&output, m.listAndDescView())
 	}
 
 	// Help bar.
-	_, _ = fmt.Fprintln(&sb)
-	_, _ = fmt.Fprintln(&sb, renderHelpBar(m.width))
+	_, _ = fmt.Fprintln(&output)
+	_, _ = fmt.Fprintln(&output, renderHelpBar(m.width))
 
-	return sb.String()
+	return output.String()
 }
 
 // execScreenView renders the two-pane layout with the command list dimmed on
 // the left and the execution panel on the right.
 func (m model) execScreenView() string {
-	lw := m.listWidth()
-	rw := m.descWidth()
-
 	// Left pane: dim the list to indicate it's inactive.
-	leftContent := styles.ItemDim.Render(m.current.View())
-	left := styles.LeftPane.Width(lw).Render(leftContent)
+	left := styles.LeftPane.Width(m.listWidth()).Render(
+		styles.ItemDim.Render(m.commandList.View()),
+	)
 
 	divider := styles.Divider.Render(strings.Repeat("│", m.height))
 
 	// Right pane: exec model.
-	right := lipgloss.NewStyle().Width(rw).Render(m.execModel.View())
+	right := lipgloss.NewStyle().Width(m.descWidth()).Render(m.execModel.View())
 
 	return lipgloss.JoinHorizontal(lipgloss.Top, left, divider, right)
 }
@@ -405,50 +403,45 @@ func (m model) headerView() string {
 	// Pad version to the right edge.
 	titleLen := lipgloss.Width(title)
 	versionLen := lipgloss.Width(version)
-	pad := m.width - titleLen - versionLen - 2
-	if pad < 1 {
-		pad = 1
+	versionPadding := m.width - titleLen - versionLen - 2
+	if versionPadding < 1 {
+		versionPadding = 1
 	}
 
-	return title + strings.Repeat(" ", pad) + version
+	return title + strings.Repeat(" ", versionPadding) + version
 }
 
 func (m model) listAndDescView() string {
-	lw := m.listWidth()
-	rw := m.descWidth()
+	leftWidth := m.listWidth() // used twice: pane width + list size
 
-	leftContent := m.current.View()
-	left := styles.LeftPane.Width(lw).Render(leftContent)
-
-	rightContent := m.descriptionView()
-	right := styles.RightPane.Width(rw).Render(rightContent)
-
+	left := styles.LeftPane.Width(leftWidth).Render(m.commandList.View())
+	right := styles.RightPane.Width(m.descWidth()).Render(m.descriptionView())
 	divider := styles.Divider.Render(strings.Repeat("│", m.listHeight()))
 
 	return lipgloss.JoinHorizontal(lipgloss.Top, left, divider, right)
 }
 
 func (m model) descriptionView() string {
-	sel, ok := m.current.SelectedItem().(CommandItem)
+	sel, ok := m.commandList.SelectedItem().(CommandItem)
 	if !ok || sel.IsBack {
 		return styles.DescBody.Render("Select a command to see its description.")
 	}
 
-	var sb strings.Builder
+	var output strings.Builder
 
 	// Command name as title.
 	title := sel.Title()
 	if sel.HasSubCommands() {
 		title += " ›"
 	}
-	_, _ = fmt.Fprintln(&sb, styles.DescTitle.Render(title))
+	_, _ = fmt.Fprintln(&output, styles.DescTitle.Render(title))
 
 	// Full description.
 	desc := sel.LongDescription()
 	wrapped := wordWrap(desc, m.descWidth()-4)
-	_, _ = fmt.Fprintln(&sb, styles.DescBody.Render(wrapped))
+	_, _ = fmt.Fprintln(&output, styles.DescBody.Render(wrapped))
 
-	return sb.String()
+	return output.String()
 }
 
 // --- Layout helpers -------------------------------------------------------------
