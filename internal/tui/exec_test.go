@@ -26,7 +26,7 @@ import (
 )
 
 func TestExecModelInit(t *testing.T) {
-	m := NewExecModel("service start php83", "1.0.0", false, nil, nil, 0, 80, 24)
+	m := NewExecModel("service start php83", "1.0.0", false, nil, nil, nil, 0, 80, 24)
 	cmd := m.Init()
 	if cmd == nil {
 		t.Error("Init() should return a non-nil Cmd (tick + wait)")
@@ -34,7 +34,7 @@ func TestExecModelInit(t *testing.T) {
 }
 
 func TestExecModelDoneOnExecDoneMsg(t *testing.T) {
-	m := NewExecModel("install", "1.0.0", false, nil, nil, 0, 80, 24)
+	m := NewExecModel("install", "1.0.0", false, nil, nil, nil, 0, 80, 24)
 
 	rm, _ := m.Update(execDoneMsg{err: nil})
 
@@ -51,7 +51,7 @@ func TestExecModelDoneOnExecDoneMsg(t *testing.T) {
 }
 
 func TestExecModelFailedExecDoneMsg(t *testing.T) {
-	m := NewExecModel("service start php83", "1.0.0", false, nil, nil, 0, 80, 24)
+	m := NewExecModel("service start php83", "1.0.0", false, nil, nil, nil, 0, 80, 24)
 	sentinel := errors.New("exit status 1")
 
 	rm, _ := m.Update(execDoneMsg{err: sentinel})
@@ -62,25 +62,22 @@ func TestExecModelFailedExecDoneMsg(t *testing.T) {
 	if rm.Err() != sentinel {
 		t.Errorf("expected sentinel error, got %v", rm.Err())
 	}
-	// Failure — should show prompt.
-	if !rm.awaitingLogPrompt {
-		t.Error("expected awaitingLogPrompt true after failure")
+	// Prompt is NOT shown immediately — it appears on first keypress.
+	if rm.awaitingLogPrompt {
+		t.Error("awaitingLogPrompt should not be set by execDoneMsg (only on keypress)")
 	}
 }
 
 func TestExecModelLogPromptYesOpensViewer(t *testing.T) {
-	m := NewExecModel("install", "1.0.0", false, nil, nil, 0, 80, 24)
+	m := NewExecModel("install", "1.0.0", false, nil, nil, nil, 0, 80, 24)
 
 	// Trigger failure.
 	m, _ = m.Update(execDoneMsg{err: errors.New("exit status 1")})
-	if !m.awaitingLogPrompt {
-		t.Fatal("expected awaitingLogPrompt after failure")
-	}
 
-	// Press Y.
+	// Press Y directly — skips prompt and opens log immediately.
 	m2, cmd := m.Update(tea.KeyPressMsg{Text: "y"})
 	if m2.awaitingLogPrompt {
-		t.Error("awaitingLogPrompt should be cleared after Y")
+		t.Error("awaitingLogPrompt should not be set when Y pressed directly")
 	}
 	if cmd == nil {
 		t.Error("expected loadLogCmd to be returned after Y")
@@ -94,10 +91,14 @@ func TestExecModelLogPromptYesOpensViewer(t *testing.T) {
 }
 
 func TestExecModelLogPromptEnterOpensViewer(t *testing.T) {
-	m := NewExecModel("install", "1.0.0", false, nil, nil, 0, 80, 24)
+	m := NewExecModel("install", "1.0.0", false, nil, nil, nil, 0, 80, 24)
 	m, _ = m.Update(execDoneMsg{err: errors.New("exit status 1")})
 
-	// Enter should behave like Y.
+	// Any other key triggers the prompt; then Enter confirms.
+	m, _ = m.Update(tea.KeyPressMsg{Text: "x"}) // show prompt
+	if !m.awaitingLogPrompt {
+		t.Fatal("expected awaitingLogPrompt after non-y keypress on failure")
+	}
 	m2, cmd := m.Update(tea.KeyPressMsg{Text: "enter"})
 	if m2.awaitingLogPrompt {
 		t.Error("awaitingLogPrompt should be cleared after Enter")
@@ -108,18 +109,22 @@ func TestExecModelLogPromptEnterOpensViewer(t *testing.T) {
 }
 
 func TestExecModelLogPromptNoQuits(t *testing.T) {
-	m := NewExecModel("install", "1.0.0", false, nil, nil, 0, 80, 24)
+	m := NewExecModel("install", "1.0.0", false, nil, nil, nil, 0, 80, 24)
 	m, _ = m.Update(execDoneMsg{err: errors.New("exit status 1")})
 
-	// Press N.
+	// Show prompt with any neutral key, then press N.
+	m, _ = m.Update(tea.KeyPressMsg{Text: "x"}) // show prompt
+	if !m.awaitingLogPrompt {
+		t.Fatal("expected awaitingLogPrompt after neutral keypress")
+	}
 	_, cmd := m.Update(tea.KeyPressMsg{Text: "n"})
 	if cmd == nil {
-		t.Error("expected tea.Quit after n")
+		t.Error("expected tea.Quit after n in prompt")
 	}
 }
 
 func TestExecModelLogPromptEscQuits(t *testing.T) {
-	m := NewExecModel("install", "1.0.0", false, nil, nil, 0, 80, 24)
+	m := NewExecModel("install", "1.0.0", false, nil, nil, nil, 0, 80, 24)
 	m, _ = m.Update(execDoneMsg{err: errors.New("exit status 1")})
 
 	_, cmd := m.Update(tea.KeyPressMsg{Text: "esc"})
@@ -150,7 +155,7 @@ func TestExecModelLogViewerViewportHeight(t *testing.T) {
 }
 
 func TestExecModelTaskCounting(t *testing.T) {
-	m := NewExecModel("install", "1.0.0", false, nil, nil, 10, 80, 24)
+	m := NewExecModel("install", "1.0.0", false, nil, nil, nil, 10, 80, 24)
 
 	// Simulate task lines appearing in the log.
 	m.appendLine("TASK [Gathering Facts]")
@@ -222,33 +227,31 @@ func TestTailFileMissing(t *testing.T) {
 
 func TestExecModelProgressBarRendering(t *testing.T) {
 	tests := []struct {
-		name       string
-		tasksDone  int
-		totalTasks int
-		done       bool
-		err        error
-		wantBar    bool // whether we expect a bar format vs spinner
+		name        string
+		tasksDone   int
+		totalTasks  int
+		done        bool
+		err         error
+		currentTask string
 	}{
-		{"spinner when total unknown", 5, 0, false, nil, false},
-		{"bar at 0%", 0, 20, false, nil, true},
-		{"bar at 50%", 10, 20, false, nil, true},
-		{"bar at 100%", 20, 20, false, nil, true},
-		{"bar exceeds total", 25, 20, false, nil, true},
-		{"success state", 20, 20, true, nil, false},
-		{"failure state", 15, 20, true, errors.New("fail"), false},
+		{"spinner with no task", 5, 0, false, nil, ""},
+		{"spinner with task", 10, 20, false, nil, "my : task"},
+		{"success state", 20, 20, true, nil, ""},
+		{"failure state", 15, 20, true, errors.New("fail"), ""},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			m := NewExecModel("install", "1.0.0", false, nil, nil, tc.totalTasks, 80, 24)
+			m := NewExecModel("install", "1.0.0", false, nil, nil, nil, tc.totalTasks, 80, 24)
 			m.tasksDone = tc.tasksDone
 			m.done = tc.done
 			m.err = tc.err
+			m.currentTask = tc.currentTask
 
 			view := m.progressBarView()
 
 			if tc.done {
-				// Done states show checkmark or X, not a bar.
+				// Done states show checkmark or X.
 				if tc.err != nil {
 					if !strings.Contains(view, "✘") {
 						t.Errorf("expected failure marker in view, got: %s", view)
@@ -261,19 +264,14 @@ func TestExecModelProgressBarRendering(t *testing.T) {
 				return
 			}
 
-			if tc.wantBar {
-				if !strings.Contains(view, "[") || !strings.Contains(view, "]") {
-					t.Errorf("expected bar brackets in view, got: %s", view)
-				}
-				// Check for counter format "x/y".
-				counter := fmt.Sprintf("%d/%d", tc.tasksDone, tc.totalTasks)
-				if !strings.Contains(view, counter) {
-					t.Errorf("expected counter %s in view, got: %s", counter, view)
+			// Running: should show task name (or "running..." fallback).
+			if tc.currentTask != "" {
+				if !strings.Contains(view, tc.currentTask) {
+					t.Errorf("expected task name %q in view, got: %s", tc.currentTask, view)
 				}
 			} else {
-				// Spinner mode — should contain spinner characters.
-				if tc.totalTasks == 0 && !strings.Contains(view, "tasks") {
-					t.Errorf("expected 'tasks' text in spinner view, got: %s", view)
+				if !strings.Contains(view, "running...") {
+					t.Errorf("expected 'running...' fallback in view, got: %s", view)
 				}
 			}
 		})
@@ -281,54 +279,49 @@ func TestExecModelProgressBarRendering(t *testing.T) {
 }
 
 func TestExecModelRenderProgressBarCalculations(t *testing.T) {
-	tests := []struct {
+	// The progress bar shows spinner + task name. Verify task name appears correctly.
+	tasks := []struct {
 		tasksDone  int
 		totalTasks int
-		wantFilled int // approximate filled cells (allowing for cursor)
+		task       string
 	}{
-		{0, 20, 0},   // 0% -> 0 filled
-		{5, 20, 5},   // 25% -> 5 filled
-		{10, 20, 10}, // 50% -> 10 filled
-		{20, 20, 20}, // 100% -> 20 filled
-		{30, 20, 20}, // exceeds total -> capped at 20
+		{0, 20, "first : task"},
+		{10, 20, "middle : task"},
+		{20, 20, "last : task"},
 	}
 
-	for _, tc := range tests {
+	for _, tc := range tasks {
 		t.Run(fmt.Sprintf("%d_of_%d", tc.tasksDone, tc.totalTasks), func(t *testing.T) {
-			m := NewExecModel("install", "1.0.0", false, nil, nil, tc.totalTasks, 80, 24)
+			m := NewExecModel("install", "1.0.0", false, nil, nil, nil, tc.totalTasks, 80, 24)
 			m.tasksDone = tc.tasksDone
+			m.currentTask = tc.task
 
 			view := m.progressBarView()
 
-			// Verify bar brackets are present.
-			if !strings.Contains(view, "[") || !strings.Contains(view, "]") {
-				t.Errorf("expected bar brackets in view, got: %s", view)
-			}
-
-			// Verify counter is shown correctly.
-			counter := fmt.Sprintf("%d/%d", tc.tasksDone, tc.totalTasks)
-			if !strings.Contains(view, counter) {
-				t.Errorf("expected counter %s in view, got: %s", counter, view)
+			if !strings.Contains(view, tc.task) {
+				t.Errorf("expected task %q in progress bar view, got: %s", tc.task, view)
 			}
 		})
 	}
 }
 
-func TestExecModelRenderProgressBarCursor(t *testing.T) {
-	// When incomplete, should show cursor at boundary.
-	m := NewExecModel("install", "1.0.0", false, nil, nil, 20, 80, 24)
+func TestExecModelProgressBarView(t *testing.T) {
+	// While running: should show spinner + task name.
+	m := NewExecModel("install", "1.0.0", false, nil, nil, nil, 20, 80, 24)
 	m.tasksDone = 10
+	m.currentTask = "some : task name"
 
-	view := m.renderProgressBar()
-	if !strings.Contains(view, string(progressBarCursor)) {
-		t.Errorf("expected cursor '>' in incomplete bar, got: %s", view)
+	view := m.progressBarView()
+	if !strings.Contains(view, "some : task name") {
+		t.Errorf("expected task name in progress bar, got: %s", view)
 	}
 
-	// When complete, no cursor.
+	// When done with success: should show checkmark.
+	m.done = true
 	m.tasksDone = 20
-	view = m.renderProgressBar()
-	if strings.Contains(view, string(progressBarCursor)) {
-		t.Errorf("unexpected cursor in complete bar, got: %s", view)
+	view = m.progressBarView()
+	if !strings.Contains(view, "✔") {
+		t.Errorf("expected checkmark in completed bar, got: %s", view)
 	}
 }
 
@@ -350,4 +343,44 @@ func makeLines(n int) []string {
 		lines[i] = fmt.Sprintf("line %d", i+1)
 	}
 	return lines
+}
+
+func TestParseAnsibleTaskLine(t *testing.T) {
+	// Simulate what the callback plugin writes to stdout per task:
+	// \x1b[2K\r\033[0;32m⠙\033[0;0m taskname\r
+	tests := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{
+			name:  "typical callback output",
+			input: "\x1b[2K\r\033[0;32m⠙\033[0;0m ensure rabbitmq is started\r",
+			want:  "ensure rabbitmq is started",
+		},
+		{
+			name:  "different spinner frame",
+			input: "\x1b[2K\r\033[0;32m⠸\033[0;0m shared-variables : set 'current_os' var\r",
+			want:  "shared-variables : set 'current_os' var",
+		},
+		{
+			name:  "multiple segments — last wins",
+			input: "\x1b[2K\r\033[0;32m⠋\033[0;0m first task\r\x1b[2K\r\033[0;32m⠙\033[0;0m second task\r",
+			want:  "second task",
+		},
+		{
+			name:  "empty input",
+			input: "",
+			want:  "",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := parseAnsibleTaskLine([]byte(tc.input))
+			if got != tc.want {
+				t.Errorf("parseAnsibleTaskLine(%q) = %q, want %q", tc.input, got, tc.want)
+			}
+		})
+	}
 }

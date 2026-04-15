@@ -17,8 +17,10 @@ package tui
 import (
 	"bufio"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
+	"regexp"
 	"strings"
 	"time"
 
@@ -77,6 +79,13 @@ type execDoneMsg struct{ err error }
 // It is delivered via tea.Cmd so the file read never blocks the render loop.
 type logViewReadyMsg struct{ lines []string }
 
+// ansibleTaskMsg carries a task name read from ansible-playbook's stdout.
+// The callback plugin writes "⠙ taskname\r" to stdout for each task start.
+type ansibleTaskMsg string
+
+// ansiEscape matches ANSI escape sequences (colors, cursor control, erase).
+var ansiEscape = regexp.MustCompile(`\x1b\[[0-9;?]*[a-zA-Z]|\x1b\[2K`)
+
 // ExecModel is a Bubble Tea model that shows a scrollable live log panel
 // while an ansible-playbook subprocess is running. On failure it offers
 // to open a full-screen log viewer.
@@ -99,6 +108,11 @@ type ExecModel struct {
 	// cleanup is a function that deletes temporary files created for the process.
 	// Called in the execDoneMsg handler after the log file is closed.
 	cleanup func()
+
+	// ansibleOut is the reader connected to ansible-playbook's stdout pipe.
+	// The callback plugin writes "⠙ taskname\r" lines here for each task start.
+	// readTaskCmd reads one such segment and sends it as ansibleTaskMsg.
+	ansibleOut io.Reader
 
 	// logFile is the open debug.log handle seeked to EOF before the run.
 	logFile *os.File
@@ -162,7 +176,7 @@ type ExecModel struct {
 // the file before the subprocess starts, we end up with a handle to the
 // now-rotated debug.log.1, missing all new output. Instead, we open the file
 // lazily in readNewLogLines() after the rotation has already occurred.
-func NewExecModel(command, version string, withSidebar bool, proc *exec.Cmd, cleanup func(), totalTasks, width, height int) ExecModel {
+func NewExecModel(command, version string, withSidebar bool, proc *exec.Cmd, ansibleOut io.Reader, cleanup func(), totalTasks, width, height int) ExecModel {
 	viewport := viewport.New(viewport.WithWidth(width), viewport.WithHeight(execViewportHeight(height, false)))
 	viewport.SetContent("")
 
@@ -171,6 +185,7 @@ func NewExecModel(command, version string, withSidebar bool, proc *exec.Cmd, cle
 		version:     version,
 		withSidebar: withSidebar,
 		proc:        proc,
+		ansibleOut:  ansibleOut,
 		cleanup:     cleanup,
 		logFile:     nil, // opened lazily in readNewLogLines()
 		viewport:    viewport,
@@ -193,7 +208,7 @@ func (e ExecModel) SetSize(width, height int) ExecModel {
 	return e
 }
 
-// Init starts the log poller and the process waiter.
+// Init starts the log poller, the process waiter, and the stdout task reader.
 // The first tick is delayed 300ms to allow Ansible to start, load modules,
 // and rotate the log file before we attempt to open it. Subsequent ticks
 // fire every 50ms.
@@ -201,12 +216,23 @@ func (e ExecModel) Init() tea.Cmd {
 	return tea.Batch(
 		firstTickCmd(), // 300ms delay for first read (after Ansible rotates)
 		waitForProcess(e.proc),
+		readTaskCmd(e.ansibleOut), // stream task names from ansible stdout
 	)
 }
 
 // Update handles log lines, tick events, process exit, and key presses.
 func (e ExecModel) Update(msg tea.Msg) (ExecModel, tea.Cmd) {
 	switch msg := msg.(type) {
+	case ansibleTaskMsg:
+		// A new task name arrived from ansible's stdout pipe.
+		if string(msg) != "" {
+			e.currentTask = string(msg)
+			// Queue the next read only when we got real data.
+			// Empty msg means EOF (process exited) — stop re-queuing.
+			return e, readTaskCmd(e.ansibleOut)
+		}
+		return e, nil
+
 	case execTickMsg:
 		lines := e.readNewLogLines()
 		if len(lines) > 0 {
@@ -505,27 +531,11 @@ func (e ExecModel) IsDone() bool { return e.done }
 // Err returns the subprocess exit error, if any.
 func (e ExecModel) Err() error { return e.err }
 
-// parseTaskName extracts the task name from a "TASK [role : task name]" line.
-// Input example: "TASK [shared-variables : set 'current_os' var] ****..."
-// Returns: "shared-variables : set 'current_os' var"
-func parseTaskName(line string) string {
-	start := strings.Index(line, "[")
-	end := strings.Index(line, "]")
-	if start == -1 || end == -1 || start >= end {
-		return ""
-	}
-	return strings.TrimSpace(line[start+1 : end])
-}
-
 // appendLine appends a single line to the live viewport and counts tasks.
+// currentTask is no longer updated here — it comes from ansibleTaskMsg (stdout pipe).
 func (e *ExecModel) appendLine(line string) {
 	if strings.HasPrefix(line, taskLogPrefix) {
 		e.tasksDone++
-		taskName := parseTaskName(line)
-		if taskName != "" {
-			// Always show the most recently discovered task (what Ansible is currently on).
-			e.currentTask = taskName
-		}
 	}
 	current := e.viewport.GetContent()
 	if current == "" {
@@ -538,15 +548,11 @@ func (e *ExecModel) appendLine(line string) {
 
 // appendLines appends multiple lines to the live viewport in one call,
 // counting tasks as they appear.
+// currentTask is no longer updated here — it comes from ansibleTaskMsg (stdout pipe).
 func (e *ExecModel) appendLines(lines []string) {
 	for _, line := range lines {
 		if strings.HasPrefix(line, taskLogPrefix) {
 			e.tasksDone++
-			taskName := parseTaskName(line)
-			if taskName != "" {
-				// Always show the most recently discovered task (what Ansible is currently on).
-				e.currentTask = taskName
-			}
 		}
 	}
 	joined := strings.Join(lines, "\n")
@@ -619,6 +625,54 @@ func waitForProcess(cmd *exec.Cmd) tea.Cmd {
 		}
 		return execDoneMsg{err: cmd.Wait()}
 	}
+}
+
+// readTaskCmd returns a tea.Cmd that blocks reading from r until it sees \r
+// (the line terminator the Ansible callback uses for spinner lines).
+// It strips ANSI escape codes, splits on \r, and returns the last non-empty
+// segment as an ansibleTaskMsg after removing the leading spinner character.
+// When r reaches EOF (process exited) it returns an empty ansibleTaskMsg.
+func readTaskCmd(r io.Reader) tea.Cmd {
+	if r == nil {
+		return nil
+	}
+	return func() tea.Msg {
+		buf := make([]byte, 4096)
+		n, err := r.Read(buf)
+		if n == 0 || err != nil {
+			// EOF or error — stop reading.
+			return ansibleTaskMsg("")
+		}
+		name := parseAnsibleTaskLine(buf[:n])
+		return ansibleTaskMsg(name)
+	}
+}
+
+// parseAnsibleTaskLine strips ANSI escape codes from raw bytes, splits on \r,
+// and returns the task name from the last non-empty segment.
+// The callback writes: "\x1b[2K\r\033[0;32m⠙\033[0;0m taskname\r"
+// After stripping ANSI: "⠙ taskname"
+// After trimming spinner + space: "taskname"
+func parseAnsibleTaskLine(raw []byte) string {
+	// Strip ANSI escape sequences.
+	clean := ansiEscape.ReplaceAllString(string(raw), "")
+	// Split on \r — each segment is one overwritten line.
+	parts := strings.Split(clean, "\r")
+	// Walk backwards to find the last non-empty segment.
+	for i := len(parts) - 1; i >= 0; i-- {
+		seg := strings.TrimSpace(parts[i])
+		if seg == "" {
+			continue
+		}
+		// The segment starts with a spinner character (one Unicode rune) + space.
+		// Strip it to get the bare task name.
+		runes := []rune(seg)
+		if len(runes) > 2 {
+			return strings.TrimSpace(string(runes[2:]))
+		}
+		return seg
+	}
+	return ""
 }
 
 // loadLogCmd reads up to logViewMaxLines from the end of the log file
