@@ -291,12 +291,8 @@ func (m model) openPasswordScreen() (tea.Model, tea.Cmd) {
 		commandStr += " " + val
 	}
 
-	// Pre-parse to count tasks for the progress bar.
-	// This runs without sudo and returns 0 on failure (graceful fallback).
-	args := m.argsFromInlineBox()
-	if opts, err := resolveRunOpts(m.root, args); err == nil {
-		m.totalTasks = ansible.ListTasks(opts)
-	}
+	// Using spinner for progress instead of progress bar.
+	m.totalTasks = 0
 
 	box := NewPasswordBox(commandStr, m.width)
 	m.passwordBox = &box
