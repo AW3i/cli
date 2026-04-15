@@ -126,6 +126,8 @@ func (standalone standaloneExecModel) View() tea.View {
 
 // resolveRunOpts walks the cobra command tree to find the matching command
 // for the given args and builds an ansible.RunOpts from it.
+// Separates positional arguments from flags: tokens starting with "-" go to Opts,
+// everything else goes to Args.
 func resolveRunOpts(root *cobra.Command, args []string) (*ansible.RunOpts, error) {
 	if len(args) == 0 {
 		return nil, fmt.Errorf("no command specified")
@@ -139,6 +141,16 @@ func resolveRunOpts(root *cobra.Command, args []string) (*ansible.RunOpts, error
 	// The cobra Use field contains the command name as the first word.
 	playbook := strings.SplitN(cmd.Use, " ", 2)[0]
 
+	// Separate positional args from opts (flags starting with "-").
+	var positionalArgs, opts []string
+	for _, token := range remaining {
+		if strings.HasPrefix(token, "-") {
+			opts = append(opts, token)
+		} else {
+			positionalArgs = append(positionalArgs, token)
+		}
+	}
+
 	workDir, err := os.Getwd()
 	if err != nil {
 		workDir = "."
@@ -146,7 +158,8 @@ func resolveRunOpts(root *cobra.Command, args []string) (*ansible.RunOpts, error
 
 	return &ansible.RunOpts{
 		Playbook: playbook,
-		Args:     remaining,
+		Args:     positionalArgs,
+		Opts:     opts,
 		WorkDir:  workDir,
 	}, nil
 }
