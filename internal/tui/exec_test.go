@@ -17,6 +17,7 @@ package tui
 import (
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -373,6 +374,31 @@ func TestParseAnsibleTaskLine(t *testing.T) {
 			input: "",
 			want:  "",
 		},
+		{
+			// The callback writes \x1b[2K\r BEFORE the spinner+taskname line.
+			// A Read() call that returns only the FLUSH prefix must not extract
+			// any task name (previously this caused readTaskCmd to stop early).
+			name:  "flush-only line returns empty",
+			input: "\x1b[2K\r",
+			want:  "",
+		},
+		{
+			// The callback writes a play-start line with \n (not \r):
+			//   print(BLUE + "▶ " + BOLD + name + RESET + CURSOR_HIDE, end="\n")
+			// This must not be mistaken for a task name (previously the
+			// play-start marker ▶ was stripped as if it were a spinner, yielding
+			// the play name instead of a task name).
+			name:  "play-start line returns empty",
+			input: "\x1b[1;34m▶ \x1b[;1mvalet.sh\x1b[0;0m\x1b[?25l\n",
+			want:  "",
+		},
+		{
+			// A Read() that captures the play-start line + FLUSH + a real task
+			// must still return the task name (not the play name).
+			name:  "play-start mixed with task line — task name wins",
+			input: "\x1b[1;34m▶ \x1b[;1mvalet.sh\x1b[0;0m\x1b[?25l\n\x1b[2K\r\x1b[0;32m⠙\x1b[0;0m Gathering Facts\r",
+			want:  "Gathering Facts",
+		},
 	}
 
 	for _, tc := range tests {
@@ -382,5 +408,93 @@ func TestParseAnsibleTaskLine(t *testing.T) {
 				t.Errorf("parseAnsibleTaskLine(%q) = %q, want %q", tc.input, got, tc.want)
 			}
 		})
+	}
+}
+
+func TestParseLogTaskName(t *testing.T) {
+	// Test parsing task names from debug.log format:
+	// "TASK [role-name : task-name] ****..."
+	tests := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{
+			name:  "typical task line",
+			input: "TASK [sudo-permission-check : Reset sudo session] ******************************",
+			want:  "sudo-permission-check : Reset sudo session",
+		},
+		{
+			name:  "task line with short role",
+			input: "TASK [shared-variables : set 'current_user', 'current_group' and 'current_home'] ***",
+			want:  "shared-variables : set 'current_user', 'current_group' and 'current_home'",
+		},
+		{
+			name:  "task with no role prefix",
+			input: "TASK [Gathering Facts] ****",
+			want:  "Gathering Facts",
+		},
+		{
+			name:  "empty brackets",
+			input: "TASK [] ****",
+			want:  "",
+		},
+		{
+			name:  "no opening bracket",
+			input: "TASK role-name : task-name] ****",
+			want:  "",
+		},
+		{
+			name:  "no closing bracket",
+			input: "TASK [role-name : task-name ****",
+			want:  "",
+		},
+		{
+			name:  "not a task line (but still has brackets) — parseLogTaskName extracts anyway",
+			input: "PLAY [some play] ****",
+			want:  "some play",
+		},
+		{
+			name:  "empty input",
+			input: "",
+			want:  "",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := parseLogTaskName(tc.input)
+			if got != tc.want {
+				t.Errorf("parseLogTaskName(%q) = %q, want %q", tc.input, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestReadTaskCmdSkipsFlushLines(t *testing.T) {
+	// Simulate a pipe that sends: FLUSH-only data, then a real task line.
+	// readTaskCmd must skip the FLUSH and return the task name, not stop early.
+	flush := "\x1b[2K\r"
+	taskLine := "\x1b[2K\r\x1b[0;32m⠙\x1b[0;0m my : task name\r"
+
+	pr, pw := io.Pipe()
+
+	// Writer goroutine: send FLUSH then task line.
+	go func() {
+		pw.Write([]byte(flush))
+		// small delay to ensure two separate Read() calls are possible
+		pw.Write([]byte(taskLine))
+		pw.Close()
+	}()
+
+	cmd := readTaskCmd(pr)
+	msg := cmd()
+
+	taskMsg, ok := msg.(ansibleTaskMsg)
+	if !ok {
+		t.Fatalf("expected ansibleTaskMsg, got %T", msg)
+	}
+	if string(taskMsg) != "my : task name" {
+		t.Errorf("expected %q, got %q", "my : task name", string(taskMsg))
 	}
 }

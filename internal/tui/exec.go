@@ -532,10 +532,15 @@ func (e ExecModel) IsDone() bool { return e.done }
 func (e ExecModel) Err() error { return e.err }
 
 // appendLine appends a single line to the live viewport and counts tasks.
-// currentTask is no longer updated here — it comes from ansibleTaskMsg (stdout pipe).
+// When a TASK line is found, currentTask is updated to the task name.
 func (e *ExecModel) appendLine(line string) {
 	if strings.HasPrefix(line, taskLogPrefix) {
 		e.tasksDone++
+		// Extract and display the current task name.
+		// This is the primary source; the ansibleTaskMsg (stdout pipe) is secondary.
+		if taskName := parseLogTaskName(line); taskName != "" {
+			e.currentTask = taskName
+		}
 	}
 	current := e.viewport.GetContent()
 	if current == "" {
@@ -547,12 +552,16 @@ func (e *ExecModel) appendLine(line string) {
 }
 
 // appendLines appends multiple lines to the live viewport in one call,
-// counting tasks as they appear.
-// currentTask is no longer updated here — it comes from ansibleTaskMsg (stdout pipe).
+// counting tasks as they appear and updating currentTask.
 func (e *ExecModel) appendLines(lines []string) {
 	for _, line := range lines {
 		if strings.HasPrefix(line, taskLogPrefix) {
 			e.tasksDone++
+			// Update to the most recent task in this batch.
+			// This ensures currentTask reflects the latest TASK line found.
+			if taskName := parseLogTaskName(line); taskName != "" {
+				e.currentTask = taskName
+			}
 		}
 	}
 	joined := strings.Join(lines, "\n")
@@ -627,52 +636,101 @@ func waitForProcess(cmd *exec.Cmd) tea.Cmd {
 	}
 }
 
-// readTaskCmd returns a tea.Cmd that blocks reading from r until it sees \r
-// (the line terminator the Ansible callback uses for spinner lines).
-// It strips ANSI escape codes, splits on \r, and returns the last non-empty
-// segment as an ansibleTaskMsg after removing the leading spinner character.
-// When r reaches EOF (process exited) it returns an empty ansibleTaskMsg.
+// readTaskCmd returns a tea.Cmd that blocks reading from r until it gets a
+// real task name from ansible-playbook's stdout, then delivers it as an
+// ansibleTaskMsg. It loops internally so that non-task output (e.g. the
+// FLUSH-only "\x1b[2K\r" line the callback writes before every task, or the
+// play-start "▶ Play Name\n" line) never causes an early return of an empty
+// message.
+//
+// An empty ansibleTaskMsg is only returned when r reaches EOF (the process
+// has exited and the pipe is closed), which signals the Update handler to
+// stop re-queuing this command.
 func readTaskCmd(r io.Reader) tea.Cmd {
 	if r == nil {
 		return nil
 	}
 	return func() tea.Msg {
 		buf := make([]byte, 4096)
-		n, err := r.Read(buf)
-		if n == 0 || err != nil {
-			// EOF or error — stop reading.
-			return ansibleTaskMsg("")
+		for {
+			n, err := r.Read(buf)
+			if n > 0 {
+				name := parseAnsibleTaskLine(buf[:n])
+				if name != "" {
+					// Got a real task name — deliver it.
+					return ansibleTaskMsg(name)
+				}
+				// Got data but no task name (FLUSH-only line, play-start line,
+				// etc.) — keep reading rather than delivering an empty message
+				// that would be mistaken for EOF.
+			}
+			if err != nil {
+				// io.EOF or pipe closed: process has exited.
+				return ansibleTaskMsg("")
+			}
 		}
-		name := parseAnsibleTaskLine(buf[:n])
-		return ansibleTaskMsg(name)
 	}
 }
 
+// spinnerRunes is the set of Unicode braille characters the Ansible callback
+// plugin cycles through as its spinner animation. Only lines whose first rune
+// is one of these are treated as task-name lines.
+var spinnerRunes = map[rune]bool{
+	'⠋': true, '⠙': true, '⠹': true, '⠸': true, '⠼': true,
+	'⠴': true, '⠦': true, '⠧': true, '⠇': true, '⠏': true,
+}
+
 // parseAnsibleTaskLine strips ANSI escape codes from raw bytes, splits on \r,
-// and returns the task name from the last non-empty segment.
-// The callback writes: "\x1b[2K\r\033[0;32m⠙\033[0;0m taskname\r"
+// and returns the task name from the last non-empty segment that begins with a
+// known spinner character.
+//
+// The callback writes per task: "\x1b[2K\r\033[0;32m⠙\033[0;0m taskname\r"
 // After stripping ANSI: "⠙ taskname"
 // After trimming spinner + space: "taskname"
+//
+// Lines that do not start with a spinner rune (e.g. the play-start line
+// "▶ Play Name\n" or the FLUSH-only "\r" prefix) are skipped, so they never
+// produce a false task name.
 func parseAnsibleTaskLine(raw []byte) string {
 	// Strip ANSI escape sequences.
 	clean := ansiEscape.ReplaceAllString(string(raw), "")
 	// Split on \r — each segment is one overwritten line.
 	parts := strings.Split(clean, "\r")
-	// Walk backwards to find the last non-empty segment.
+	// Walk backwards to find the last segment that looks like a task line.
 	for i := len(parts) - 1; i >= 0; i-- {
 		seg := strings.TrimSpace(parts[i])
 		if seg == "" {
 			continue
 		}
-		// The segment starts with a spinner character (one Unicode rune) + space.
-		// Strip it to get the bare task name.
 		runes := []rune(seg)
-		if len(runes) > 2 {
+		// Must start with a known spinner rune followed by a space and the task name.
+		if len(runes) > 2 && spinnerRunes[runes[0]] && runes[1] == ' ' {
 			return strings.TrimSpace(string(runes[2:]))
 		}
-		return seg
+		// Not a task line (play-start, FLUSH remnant, etc.) — keep looking.
 	}
 	return ""
+}
+
+// parseLogTaskName extracts the task name from a log line like:
+// "TASK [role-name : task-name] ****..."
+// Only called from appendLine/appendLines after verifying the line starts with "TASK [".
+// Returns the task name part (role-name : task-name) or empty string if no brackets found.
+func parseLogTaskName(line string) string {
+	// Line format: "TASK [role-name : task-name] ****..."
+	// Find opening bracket
+	start := strings.Index(line, "[")
+	if start == -1 {
+		return ""
+	}
+	// Find closing bracket
+	end := strings.Index(line, "]")
+	if end == -1 || end <= start {
+		return ""
+	}
+	// Extract the part between brackets and trim whitespace
+	taskName := strings.TrimSpace(line[start+1 : end])
+	return taskName
 }
 
 // loadLogCmd reads up to logViewMaxLines from the end of the log file

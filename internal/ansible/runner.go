@@ -246,6 +246,10 @@ func RunSubprocess(opts *RunOpts) (*exec.Cmd, io.Reader, func(), error) {
 
 	env := os.Environ()
 	env = setEnv(env, "OLDPWD", workDir)
+	// Force Python to write stdout unbuffered so the callback plugin's spinner
+	// lines ("⠙ taskname\r") arrive at the Go pipe reader in real time instead
+	// of sitting in Python's 8 KB internal buffer until process exit.
+	env = setEnv(env, "PYTHONUNBUFFERED", "1")
 
 	cmd := exec.Command(ansibleBin, args...)
 	cmd.Dir = repoDir
