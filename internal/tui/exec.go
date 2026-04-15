@@ -16,6 +16,7 @@ package tui
 
 import (
 	"bufio"
+	"encoding/base64"
 	"fmt"
 	"io"
 	"os"
@@ -308,11 +309,14 @@ func (e ExecModel) Update(msg tea.Msg) (ExecModel, tea.Cmd) {
 func (e ExecModel) handleKey(msg tea.KeyPressMsg) (ExecModel, tea.Cmd) {
 	key := msg.String()
 
-	// Log viewer is open — scroll or quit.
+	// Log viewer is open — scroll, copy, or quit.
 	if e.logViewOpen {
 		switch key {
 		case "q", "esc", "ctrl+c":
 			return e, tea.Quit
+		case "C":
+			copyToClipboardOSC52(e.logViewer.GetContent())
+			return e, nil
 		}
 		var cmd tea.Cmd
 		e.logViewer, cmd = e.logViewer.Update(msg)
@@ -332,7 +336,7 @@ func (e ExecModel) handleKey(msg tea.KeyPressMsg) (ExecModel, tea.Cmd) {
 		return e, nil
 	}
 
-	// Still running — scroll viewport or handle ctrl+c.
+	// Still running — scroll viewport, copy, or handle ctrl+c.
 	if !e.done {
 		if key == "ctrl+c" {
 			// Signal the subprocess to terminate.
@@ -346,12 +350,16 @@ func (e ExecModel) handleKey(msg tea.KeyPressMsg) (ExecModel, tea.Cmd) {
 			}
 			return e, tea.Quit
 		}
+		if key == "C" {
+			copyToClipboardOSC52(e.viewport.GetContent())
+			return e, nil
+		}
 		var cmd tea.Cmd
 		e.viewport, cmd = e.viewport.Update(msg)
 		return e, cmd
 	}
 
-	// Done with error — show prompt on first key press (unless it's ctrl+c or y/Y).
+	// Done with error — show prompt on first key press (unless it's ctrl+c or y/Y), or copy.
 	if e.err != nil && !e.awaitingLogPrompt {
 		if key == "ctrl+c" || key == "esc" || key == "q" {
 			return e, tea.Quit
@@ -360,13 +368,22 @@ func (e ExecModel) handleKey(msg tea.KeyPressMsg) (ExecModel, tea.Cmd) {
 		if key == "y" || key == "Y" {
 			return e, loadLogCmd()
 		}
+		// If user presses C, copy the viewport content.
+		if key == "C" {
+			copyToClipboardOSC52(e.viewport.GetContent())
+			return e, nil
+		}
 		// Any other key: show the prompt and wait for response.
 		e.awaitingLogPrompt = true
 		e.viewport.SetHeight(execViewportHeight(e.height, true))
 		return e, nil
 	}
 
-	// Done (success) — any key exits.
+	// Done (success) — C to copy or any other key exits.
+	if key == "C" {
+		copyToClipboardOSC52(e.viewport.GetContent())
+		return e, nil
+	}
 	return e, tea.Quit
 }
 
@@ -486,6 +503,8 @@ func (e ExecModel) logViewerView() string {
 	_, _ = fmt.Fprint(&output,
 		styles.HelpKey.Render("↑/↓")+
 			styles.HelpDesc.Render(" scroll   ")+
+			styles.HelpKey.Render("C")+
+			styles.HelpDesc.Render(" copy   ")+
 			styles.HelpKey.Render("q/esc")+
 			styles.HelpDesc.Render(" exit"),
 	)
@@ -532,7 +551,7 @@ func (e ExecModel) progressBarView() string {
 // statusLines returns the footer content — one or two lines depending on state.
 func (e ExecModel) statusLines() string {
 	if !e.done {
-		return styles.HelpDesc.Render("⠋ running...   ↑/↓ scroll")
+		return styles.HelpDesc.Render("⠋ running...   ↑/↓ scroll   C copy")
 	}
 
 	if e.err != nil {
@@ -546,11 +565,11 @@ func (e ExecModel) statusLines() string {
 				styles.ItemDim.Render("n")
 			return failLine + "\n" + promptLine
 		}
-		return failLine + "\n" + styles.HelpDesc.Render("(press y to view log, any other key to exit)")
+		return failLine + "\n" + styles.HelpDesc.Render("(press y to view log, C to copy, any other key to exit)")
 	}
 
 	return styles.ItemSelected.Render("✔ done") +
-		"   " + styles.HelpDesc.Render("(press any key to exit)")
+		"   " + styles.HelpDesc.Render("(press C to copy or any key to exit)")
 }
 
 // IsDone returns true once the subprocess has exited.
@@ -558,6 +577,18 @@ func (e ExecModel) IsDone() bool { return e.done }
 
 // Err returns the subprocess exit error, if any.
 func (e ExecModel) Err() error { return e.err }
+
+// copyToClipboardOSC52 copies the given text to the system clipboard using the
+// OSC 52 escape sequence. This works in modern terminals like iTerm2, Kitty,
+// WezTerm, Alacritty, and tmux (with set-clipboard on). If the terminal doesn't
+// support OSC 52, this is silently ignored.
+//
+// Format: \033]52;c;<base64-encoded-text>\007
+func copyToClipboardOSC52(text string) {
+	encoded := base64.StdEncoding.EncodeToString([]byte(text))
+	oscSeq := "\033]52;c;" + encoded + "\007"
+	_, _ = os.Stdout.WriteString(oscSeq)
+}
 
 // appendLine appends a single line to the live viewport and counts tasks.
 // When a TASK line is found, currentTask is updated to the task name
