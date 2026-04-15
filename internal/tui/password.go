@@ -82,6 +82,12 @@ func (b *PasswordBox) TakePassword() []byte {
 	return val
 }
 
+// InputView returns the rendered textinput for embedding in the main content area.
+// The input field itself is rendered directly in the screen, not inside a box.
+func (b PasswordBox) InputView() string {
+	return b.input.View()
+}
+
 // IsEmpty returns true when no password has been typed yet.
 func (b PasswordBox) IsEmpty() bool {
 	return strings.TrimSpace(b.input.Value()) == ""
@@ -100,22 +106,12 @@ func (b *PasswordBox) MarkEmptyError() {
 	b.showEmptyError = true
 }
 
-// View renders the password box as a bordered string.
+// View renders only the hint line (error or help text).
+// The password input itself is rendered separately via InputView(),
+// and the command is shown in the header, so there's no redundancy.
 func (b PasswordBox) View() string {
-	innerWidth := b.width - 4
-
-	contextLine := styles.GhostCommand.Render("valet.sh " + b.command)
-
-	var hintLine string
 	if b.showEmptyError {
-		hintLine = lipgloss.NewStyle().Foreground(colourRed).Render("Password cannot be empty.")
-	} else {
-		hintLine = styles.HelpDesc.Render("Required for privileged operations.")
+		return lipgloss.NewStyle().Foreground(colourRed).Render("Password cannot be empty.")
 	}
-
-	content := contextLine + "\n" +
-		b.input.View() + "\n\n" +
-		hintLine
-
-	return styles.PreviewBox.Width(innerWidth).Render(content)
+	return styles.HelpDesc.Render("Required for privileged operations.")
 }
