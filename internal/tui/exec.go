@@ -22,6 +22,7 @@ import (
 	"os/exec"
 	"regexp"
 	"strings"
+	"syscall"
 	"time"
 
 	"charm.land/bubbles/v2/viewport"
@@ -114,12 +115,17 @@ type ExecModel struct {
 	// readTaskCmd reads one such segment and sends it as ansibleTaskMsg.
 	ansibleOut io.Reader
 
-	// logFile is the open debug.log handle.
-	logFile *os.File
+	// logFilePath is the path to the debug.log file.
+	logFilePath string
+
+	// logFileInode tracks the inode of the debug.log file.
+	// When the inode changes, it indicates the file has been rotated (Ansible re-opened it).
+	// We reset logFileOffset to 0 to read the new file from the start.
+	logFileInode uint64
 
 	// logFileOffset tracks the current read position in the log file.
-	// A fresh bufio.Reader is created each tick starting from this offset
-	// to correctly detect new content appended to the file.
+	// A fresh file handle and bufio.Reader are created each tick starting from this offset.
+	// When logFileInode changes (rotation detected), this is reset to 0.
 	logFileOffset int64
 
 	// viewport is the rolling live-log panel shown during execution.
@@ -188,7 +194,6 @@ func NewExecModel(command, version string, withSidebar bool, proc *exec.Cmd, ans
 		proc:        proc,
 		ansibleOut:  ansibleOut,
 		cleanup:     cleanup,
-		logFile:     nil, // opened lazily in readNewLogLines()
 		viewport:    viewport,
 		totalTasks:  totalTasks,
 		width:       width,
@@ -257,10 +262,6 @@ func (e ExecModel) Update(msg tea.Msg) (ExecModel, tea.Cmd) {
 		}
 		e.done = true
 		e.err = msg.err
-		if e.logFile != nil {
-			_ = e.logFile.Close()
-			e.logFile = nil
-		}
 		// Clean up temporary files (become password file, extra-vars file).
 		if e.cleanup != nil {
 			e.cleanup()
@@ -430,12 +431,35 @@ func (e ExecModel) execView() string {
 	// Progress bar: spinner + task counter while running, checkmark/cross when done.
 	_, _ = fmt.Fprintln(&output, e.progressBarView())
 
+	// Log file divider with label.
+	logLabel := styles.ItemDim.Render(" " + logPath + " ")
+	dividerWidth := e.width - lipgloss.Width(logLabel)
+	if dividerWidth < 1 {
+		dividerWidth = 1
+	}
+	_, _ = fmt.Fprintln(&output, styles.Divider.Render(strings.Repeat("─", dividerWidth))+logLabel)
+
 	// Live log viewport.
 	_, _ = fmt.Fprintln(&output, e.viewport.View())
 
-	// Footer.
+	// Footer with status and error handling.
 	_, _ = fmt.Fprintln(&output, styles.Divider.Render(strings.Repeat("─", e.width)))
-	_, _ = fmt.Fprint(&output, e.statusLines())
+
+	// If done with error, show the prompt or hint like cliView does.
+	if e.done && e.err != nil {
+		if e.awaitingLogPrompt {
+			promptLine := styles.HelpDesc.Render("View full log? ") +
+				styles.HelpKey.Render("[Y]") +
+				styles.HelpDesc.Render("/") +
+				styles.ItemDim.Render("n")
+			_, _ = fmt.Fprint(&output, promptLine)
+		} else {
+			hintLine := styles.HelpDesc.Render("(press y to view log, q to exit)")
+			_, _ = fmt.Fprint(&output, hintLine)
+		}
+	} else {
+		_, _ = fmt.Fprint(&output, e.statusLines())
+	}
 
 	return output.String()
 }
@@ -583,34 +607,46 @@ func (e *ExecModel) appendLines(lines []string) {
 }
 
 // readNewLogLines reads any lines appended to the log file since the last read.
-// The log file is opened lazily on first call (after Ansible has started and
-// rotated the log). This avoids the issue where opening the file before the
-// subprocess starts leaves us with a handle to the rotated debug.log.1.
-// A fresh bufio.Reader is created each tick starting from logFileOffset to
-// correctly detect new content appended to the file (avoiding bufio.Reader
-// state issues when the file grows after EOF).
+// The log file is re-opened each tick to detect rotation (inode change) and to
+// avoid bufio.Reader internal state caching issues.
+// When Ansible rotates the log, we detect the inode change and reset to offset 0
+// to read the newly-created file from the start.
 func (e *ExecModel) readNewLogLines() []string {
-	// Lazy-open the log file on first call. By this time, Ansible has started
-	// and the callback plugin's logger.handlers[0].doRollover() has already run,
-	// creating a fresh debug.log. We open from the start (offset 0) to capture
-	// the full run output, including the initial "---" separator lines.
-	if e.logFile == nil {
-		f, err := os.Open(logPath)
-		if err != nil {
-			return nil
-		}
-		e.logFile = f
-		e.logFileOffset = 0
+	// On first call, set the log file path.
+	if e.logFilePath == "" {
+		e.logFilePath = logPath
 	}
 
-	// Seek to the last known position and create a fresh buffered reader.
-	// This ensures we correctly detect new data appended to the file,
-	// avoiding bufio.Reader internal state caching issues.
-	_, err := e.logFile.Seek(e.logFileOffset, io.SeekStart)
+	// Open the file fresh on every tick (don't keep a persistent file handle).
+	// This allows us to detect when Ansible rotates the log file (inode change).
+	f, err := os.Open(e.logFilePath)
 	if err != nil {
 		return nil
 	}
-	reader := bufio.NewReader(e.logFile)
+	defer f.Close()
+
+	// Check the file's inode to detect rotation.
+	stat, err := f.Stat()
+	if err != nil {
+		return nil
+	}
+	currentInode := stat.Sys().(*syscall.Stat_t).Ino
+
+	// If the inode has changed, the file was rotated. Reset offset to 0
+	// to read the newly-created file from the start.
+	if e.logFileInode != 0 && currentInode != e.logFileInode {
+		e.logFileOffset = 0
+	}
+	e.logFileInode = currentInode
+
+	// Seek to the last known position.
+	_, err = f.Seek(e.logFileOffset, io.SeekStart)
+	if err != nil {
+		return nil
+	}
+
+	// Create a fresh buffered reader starting from the current offset.
+	reader := bufio.NewReader(f)
 
 	var lines []string
 	for {
@@ -623,7 +659,7 @@ func (e *ExecModel) readNewLogLines() []string {
 		if err != nil {
 			// io.EOF or other error — stop reading.
 			// Update offset to resume from here on next tick.
-			pos, _ := e.logFile.Seek(0, io.SeekCurrent)
+			pos, _ := f.Seek(0, io.SeekCurrent)
 			e.logFileOffset = pos
 			break
 		}
