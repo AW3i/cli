@@ -138,6 +138,11 @@ type ExecModel struct {
 	// Advances on every execTickMsg while the process is running.
 	spinnerFrame int
 
+	// taskQueueTick counts execTickMsg events to pace task queue draining.
+	// Dequeues one task every 5 ticks (250ms) to create human-readable
+	// pacing instead of exhausting the queue too quickly.
+	taskQueueTick int
+
 	// done is true once the subprocess has exited.
 	done bool
 
@@ -217,9 +222,11 @@ func (e ExecModel) Update(msg tea.Msg) (ExecModel, tea.Cmd) {
 		if len(lines) > 0 {
 			e.appendLines(lines)
 		}
-		// Dequeue one task per tick to show tasks sequentially.
-		// This creates a smooth scrolling effect instead of jumping to the last task.
-		if len(e.taskQueue) > 0 {
+		// Dequeue one task every 5 ticks (250ms) to show tasks at human-readable pace.
+		// Prevents the queue from draining too fast and leaving the display frozen
+		// between long-running tasks.
+		e.taskQueueTick++
+		if e.taskQueueTick%5 == 0 && len(e.taskQueue) > 0 {
 			e.currentTask = e.taskQueue[0]
 			e.taskQueue = e.taskQueue[1:]
 		}
@@ -310,7 +317,7 @@ func (e ExecModel) handleKey(msg tea.KeyPressMsg) (ExecModel, tea.Cmd) {
 	// Awaiting Y/n prompt after failure.
 	if e.awaitingLogPrompt {
 		switch key {
-		case "y", "enter":
+		case "y", "Y", "enter":
 			e.awaitingLogPrompt = false
 			return e, loadLogCmd()
 		case "n", "esc", "q", "ctrl+c":
