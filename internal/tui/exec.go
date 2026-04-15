@@ -249,6 +249,7 @@ func (e ExecModel) Update(msg tea.Msg) (ExecModel, tea.Cmd) {
 			viewport.WithWidth(e.width),
 			viewport.WithHeight(logViewerViewportHeight(e.height)),
 		)
+		e.logViewer.SoftWrap = true // Enable line wrapping for long lines
 		e.logViewer.SetContent(strings.Join(msg.lines, "\n"))
 		e.logViewer.GotoBottom()
 		e.logViewOpen = true
