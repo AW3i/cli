@@ -32,7 +32,7 @@ const (
 	logPath = "/usr/local/valet-sh/valet-sh/log/debug.log"
 
 	// logPollInterval is how often we check for new log lines while running.
-	logPollInterval = 100 * time.Millisecond
+	logPollInterval = 50 * time.Millisecond
 
 	// viewportMinHeight ensures the log area is always usable.
 	viewportMinHeight = 5
@@ -194,9 +194,12 @@ func (e ExecModel) SetSize(width, height int) ExecModel {
 }
 
 // Init starts the log poller and the process waiter.
+// Immediately fires the first tick to start reading the log right away,
+// rather than waiting 50ms. This ensures early log lines aren't missed.
 func (e ExecModel) Init() tea.Cmd {
 	return tea.Batch(
-		tickCmd(),
+		func() tea.Msg { return execTickMsg(time.Now()) }, // immediate first tick
+		tickCmd(), // then periodic ticks
 		waitForProcess(e.proc),
 	)
 }
