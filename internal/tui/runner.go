@@ -60,10 +60,6 @@ func RunWithPanel(root *cobra.Command, args []string, version string) error {
 		return root.Execute()
 	}
 
-	// Pre-parse playbook to count tasks for the progress bar.
-	// This runs without sudo and returns 0 on failure (graceful fallback).
-	totalTasks := ansible.ListTasks(opts)
-
 	// Collect sudo password from the terminal before BubbleTea takes over.
 	// The password is then written to a secure temp file and passed to Ansible
 	// via --become-password-file and in extra-vars (to suppress vars_prompt).
@@ -79,7 +75,7 @@ func RunWithPanel(root *cobra.Command, args []string, version string) error {
 	}
 
 	commandStr := strings.Join(args, " ")
-	return runExecPanel(commandStr, version, proc, cleanup, totalTasks)
+	return runExecPanel(commandStr, version, proc, cleanup, 0)
 }
 
 // runExecPanel starts a standalone Bubble Tea program showing the execution
@@ -119,7 +115,6 @@ func (standalone standaloneExecModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 func (standalone standaloneExecModel) View() tea.View {
 	v := tea.NewView(standalone.execPanel.View())
-	v.AltScreen = true
 	return v
 }
 

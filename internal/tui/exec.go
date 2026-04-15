@@ -62,19 +62,6 @@ const (
 
 	// logViewFooterHeight: hint line.
 	logViewFooterHeight = 1
-
-	// progressBarWidth is the number of character cells for the progress bar fill.
-	// 20 cells is compact enough for narrow terminals while still showing progress clearly.
-	progressBarWidth = 20
-
-	// progressBarFilled is the rune used for completed portions of the bar.
-	progressBarFilled = '='
-
-	// progressBarEmpty is the rune used for remaining portions of the bar.
-	progressBarEmpty = ' '
-
-	// progressBarCursor is the rune shown at the boundary between done and todo.
-	progressBarCursor = '>'
 )
 
 // execTickMsg fires periodically to poll the log file for new content.
@@ -239,11 +226,8 @@ func (e ExecModel) Update(msg tea.Msg) (ExecModel, tea.Cmd) {
 		if e.cleanup != nil {
 			e.cleanup()
 		}
-		// On failure: show the prompt. Resize viewport to make room.
-		if e.err != nil {
-			e.awaitingLogPrompt = true
-			e.viewport.SetHeight(execViewportHeight(e.height, true))
-		}
+		// On failure: user must press a key first, then we show the prompt.
+		// Don't resize viewport yet — we'll do that on first keypress if needed.
 		return e, nil
 
 	case logViewReadyMsg:
@@ -322,6 +306,17 @@ func (e ExecModel) handleKey(msg tea.KeyPressMsg) (ExecModel, tea.Cmd) {
 		return e, cmd
 	}
 
+	// Done with error — show prompt on first key press (unless it's ctrl+c).
+	if e.err != nil && !e.awaitingLogPrompt {
+		if key == "ctrl+c" || key == "esc" || key == "q" {
+			return e, tea.Quit
+		}
+		// User pressed a key on error — show the prompt.
+		e.awaitingLogPrompt = true
+		e.viewport.SetHeight(execViewportHeight(e.height, true))
+		return e, nil
+	}
+
 	// Done (success) — any key exits.
 	return e, tea.Quit
 }
@@ -395,11 +390,8 @@ func (e ExecModel) logViewerView() string {
 var spinnerFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
 
 // progressBarView renders the progress indicator line between the header and
-// the log viewport. If totalTasks is known, shows a real progress bar:
-//
-//	[=====>              ] 12/47
-//
-// Otherwise falls back to a spinner + task count.
+// the log viewport. Shows a spinner with task count while running, checkmark or
+// cross when done.
 func (e ExecModel) progressBarView() string {
 	if e.done {
 		if e.err != nil {
@@ -412,49 +404,11 @@ func (e ExecModel) progressBarView() string {
 		)
 	}
 
-	// Fall back to spinner if we don't know the total task count.
-	if e.totalTasks == 0 {
-		frame := spinnerFrames[e.spinnerFrame%len(spinnerFrames)]
-		spinner := styles.HelpKey.Render(frame)
-		counter := styles.HelpDesc.Render(fmt.Sprintf("  %d tasks", e.tasksDone))
-		return spinner + counter
-	}
-
-	// Render a real progress bar.
-	return e.renderProgressBar()
-}
-
-// renderProgressBar builds the [=====>    ] 12/47 string.
-func (e ExecModel) renderProgressBar() string {
-	// Calculate filled cells based on task progress.
-	var filled int
-	if e.totalTasks > 0 {
-		filled = (e.tasksDone * progressBarWidth) / e.totalTasks
-	}
-	if filled > progressBarWidth {
-		filled = progressBarWidth
-	}
-
-	// Build the bar: filled portion + cursor (if not complete) + empty portion.
-	var bar strings.Builder
-	bar.WriteByte('[')
-	for i := 0; i < filled; i++ {
-		bar.WriteRune(progressBarFilled)
-	}
-	if filled < progressBarWidth && e.tasksDone < e.totalTasks {
-		bar.WriteRune(progressBarCursor)
-		for i := filled + 1; i < progressBarWidth; i++ {
-			bar.WriteRune(progressBarEmpty)
-		}
-	} else {
-		for i := filled; i < progressBarWidth; i++ {
-			bar.WriteRune(progressBarEmpty)
-		}
-	}
-	bar.WriteByte(']')
-
-	counter := fmt.Sprintf(" %d/%d", e.tasksDone, e.totalTasks)
-	return styles.HelpKey.Render(bar.String()) + styles.HelpDesc.Render(counter)
+	// Always show spinner while running.
+	frame := spinnerFrames[e.spinnerFrame%len(spinnerFrames)]
+	spinner := styles.HelpKey.Render(frame)
+	counter := styles.HelpDesc.Render(fmt.Sprintf("  %d tasks", e.tasksDone))
+	return spinner + counter
 }
 
 // statusLines returns the footer content — one or two lines depending on state.
@@ -474,7 +428,7 @@ func (e ExecModel) statusLines() string {
 				styles.ItemDim.Render("n")
 			return failLine + "\n" + promptLine
 		}
-		return failLine + "\n" + styles.HelpDesc.Render("(press any key to exit)")
+		return failLine + "\n" + styles.HelpDesc.Render("(press y to view log, any other key to exit)")
 	}
 
 	return styles.ItemSelected.Render("✔ done") +
