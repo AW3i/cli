@@ -51,10 +51,10 @@ cli/
 **Screen state machine:**
 
 ```
-screenList  →  (enter on leaf with args)  →  screenArgs
-screenList  →  (enter on leaf, no args)   →  screenExec
-screenArgs  →  (enter, all required set)  →  screenExec
-screenExec  →  (done, failure)            →  logViewOpen = true
+screenList    →  (enter on leaf)   →  screenInline
+screenInline  →  (enter)           →  screenPassword
+screenPassword → (enter)           →  screenExec
+screenExec    →  (done, failure)   →  logViewOpen = true
 ```
 
 **Two execution paths:**

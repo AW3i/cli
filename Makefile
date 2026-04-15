@@ -89,7 +89,7 @@ mod-verify:
 	git diff --exit-code go.mod go.sum
 
 ## quality: Run all quality checks (fmt, vet, lint, mod-verify)
-quality: fmt-check vet mod-verify
+quality: fmt-check vet lint mod-verify
 
 ## clean: Remove build artifacts and coverage files
 clean:

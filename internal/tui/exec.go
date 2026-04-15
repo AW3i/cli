@@ -63,6 +63,19 @@ const (
 
 	// logViewFooterHeight: hint line.
 	logViewFooterHeight = 1
+
+	// progressBarWidth is the number of character cells for the progress bar fill.
+	// 20 cells is compact enough for narrow terminals while still showing progress clearly.
+	progressBarWidth = 20
+
+	// progressBarFilled is the rune used for completed portions of the bar.
+	progressBarFilled = '='
+
+	// progressBarEmpty is the rune used for remaining portions of the bar.
+	progressBarEmpty = ' '
+
+	// progressBarCursor is the rune shown at the boundary between done and todo.
+	progressBarCursor = '>'
 )
 
 // execTickMsg fires periodically to poll the log file for new content.
@@ -97,6 +110,10 @@ type ExecModel struct {
 	// proc is the running ansible-playbook subprocess.
 	proc *exec.Cmd
 
+	// cleanup is a function that deletes temporary files created for the process.
+	// Called in the execDoneMsg handler after the log file is closed.
+	cleanup func()
+
 	// logFile is the open debug.log handle seeked to EOF before the run.
 	logFile *os.File
 
@@ -110,6 +127,12 @@ type ExecModel struct {
 	// tasksDone is the number of Ansible tasks completed so far, counted
 	// by detecting "TASK [" lines in the rolling log output.
 	tasksDone int
+
+	// totalTasks is the total number of tasks that will be executed,
+	// determined by ansible-playbook --list-tasks before the run.
+	// Zero means the count is unknown (e.g. --list-tasks failed), so we
+	// fall back to a simple spinner without a progress bar.
+	totalTasks int
 
 	// spinnerFrame is the current index into the spinner animation frames.
 	// Advances on every execTickMsg while the process is running.
@@ -135,8 +158,10 @@ type ExecModel struct {
 
 // NewExecModel creates a new ExecModel ready to run.
 // proc must already be started via ansible.RunSubprocess().
+// cleanup is a function that deletes temporary files (passwords, extra-vars) after the process exits.
+// totalTasks is the total number of tasks (from --list-tasks), or 0 if unknown.
 // width/height are the dimensions of the panel area.
-func NewExecModel(command, version string, withSidebar bool, proc *exec.Cmd, width, height int) ExecModel {
+func NewExecModel(command, version string, withSidebar bool, proc *exec.Cmd, cleanup func(), totalTasks, width, height int) ExecModel {
 	viewport := viewport.New(viewport.WithWidth(width), viewport.WithHeight(execViewportHeight(height, false)))
 	viewport.SetContent("")
 
@@ -152,8 +177,10 @@ func NewExecModel(command, version string, withSidebar bool, proc *exec.Cmd, wid
 		version:     version,
 		withSidebar: withSidebar,
 		proc:        proc,
+		cleanup:     cleanup,
 		logFile:     logFile,
 		viewport:    viewport,
+		totalTasks:  totalTasks,
 		width:       width,
 		height:      height,
 	}
@@ -209,6 +236,10 @@ func (e ExecModel) Update(msg tea.Msg) (ExecModel, tea.Cmd) {
 		if e.logFile != nil {
 			_ = e.logFile.Close()
 			e.logFile = nil
+		}
+		// Clean up temporary files (become password file, extra-vars file).
+		if e.cleanup != nil {
+			e.cleanup()
 		}
 		// On failure: show the prompt. Resize viewport to make room.
 		if e.err != nil {
@@ -353,15 +384,15 @@ func (e ExecModel) logViewerView() string {
 
 // spinnerFrames are the animation frames for the progress spinner.
 // Each frame is displayed for one logPollInterval (100ms).
+// Used as a fallback when totalTasks is unknown.
 var spinnerFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
 
 // progressBarView renders the progress indicator line between the header and
-// the log viewport. While running it shows a spinner + task count. When done
-// it shows a static result indicator.
+// the log viewport. If totalTasks is known, shows a real progress bar:
 //
-// We count tasks rather than showing a 0–100% bar because the total number of
-// tasks is not known before execution completes — a fake percentage would be
-// misleading.
+//	[=====>              ] 12/47
+//
+// Otherwise falls back to a spinner + task count.
 func (e ExecModel) progressBarView() string {
 	if e.done {
 		if e.err != nil {
@@ -374,10 +405,49 @@ func (e ExecModel) progressBarView() string {
 		)
 	}
 
-	frame := spinnerFrames[e.spinnerFrame%len(spinnerFrames)]
-	spinner := styles.HelpKey.Render(frame)
-	counter := styles.HelpDesc.Render(fmt.Sprintf("  %d tasks", e.tasksDone))
-	return spinner + counter
+	// Fall back to spinner if we don't know the total task count.
+	if e.totalTasks == 0 {
+		frame := spinnerFrames[e.spinnerFrame%len(spinnerFrames)]
+		spinner := styles.HelpKey.Render(frame)
+		counter := styles.HelpDesc.Render(fmt.Sprintf("  %d tasks", e.tasksDone))
+		return spinner + counter
+	}
+
+	// Render a real progress bar.
+	return e.renderProgressBar()
+}
+
+// renderProgressBar builds the [=====>    ] 12/47 string.
+func (e ExecModel) renderProgressBar() string {
+	// Calculate filled cells based on task progress.
+	var filled int
+	if e.totalTasks > 0 {
+		filled = (e.tasksDone * progressBarWidth) / e.totalTasks
+	}
+	if filled > progressBarWidth {
+		filled = progressBarWidth
+	}
+
+	// Build the bar: filled portion + cursor (if not complete) + empty portion.
+	var bar strings.Builder
+	bar.WriteByte('[')
+	for i := 0; i < filled; i++ {
+		bar.WriteRune(progressBarFilled)
+	}
+	if filled < progressBarWidth && e.tasksDone < e.totalTasks {
+		bar.WriteRune(progressBarCursor)
+		for i := filled + 1; i < progressBarWidth; i++ {
+			bar.WriteRune(progressBarEmpty)
+		}
+	} else {
+		for i := filled; i < progressBarWidth; i++ {
+			bar.WriteRune(progressBarEmpty)
+		}
+	}
+	bar.WriteByte(']')
+
+	counter := fmt.Sprintf(" %d/%d", e.tasksDone, e.totalTasks)
+	return styles.HelpKey.Render(bar.String()) + styles.HelpDesc.Render(counter)
 }
 
 // statusLines returns the footer content — one or two lines depending on state.

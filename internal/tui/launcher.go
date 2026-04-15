@@ -76,6 +76,10 @@ type model struct {
 	// execModel is the full-width execution panel shown during ansible runs.
 	execModel ExecModel
 
+	// totalTasks is the number of tasks that will be executed, determined by
+	// ansible-playbook --list-tasks before the run. Zero means unknown.
+	totalTasks int
+
 	// width/height of the terminal at last WindowSizeMsg.
 	width  int
 	height int
@@ -274,14 +278,26 @@ func (m model) handleInlineKey(key string, msg tea.KeyPressMsg) (tea.Model, tea.
 }
 
 // openPasswordScreen transitions to screenPassword before executing a command.
+// It also pre-parses the playbook with --list-tasks to count total tasks
+// for the progress bar.
 func (m model) openPasswordScreen() (tea.Model, tea.Cmd) {
 	if m.inlineBox == nil {
 		return m, nil
 	}
+
+	// Build the command string for the password box header.
 	commandStr := m.commandPathFromStack()
 	if val := m.inlineBox.Value(); val != "" {
 		commandStr += " " + val
 	}
+
+	// Pre-parse to count tasks for the progress bar.
+	// This runs without sudo and returns 0 on failure (graceful fallback).
+	args := m.argsFromInlineBox()
+	if opts, err := resolveRunOpts(m.root, args); err == nil {
+		m.totalTasks = ansible.ListTasks(opts)
+	}
+
 	box := NewPasswordBox(commandStr, m.width)
 	m.passwordBox = &box
 	m.activeScreen = screenPassword
@@ -340,6 +356,19 @@ func (m model) selectItem() (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+// argsFromInlineBox builds the argv slice from the current command path
+// and whatever the user typed into the inline box.
+func (m model) argsFromInlineBox() []string {
+	if m.inlineBox == nil {
+		return strings.Fields(m.commandPathFromStack())
+	}
+	args := strings.Fields(m.commandPathFromStack())
+	if rawInput := m.inlineBox.Value(); rawInput != "" {
+		args = append(args, strings.Fields(rawInput)...)
+	}
+	return args
+}
+
 // executeWithPassword collects the password from the password screen,
 // then starts the ansible subprocess with it.
 func (m model) executeWithPassword() (tea.Model, tea.Cmd) {
@@ -347,12 +376,7 @@ func (m model) executeWithPassword() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
-	// Build args: command path + whatever the user typed (free-form).
-	args := strings.Fields(m.commandPathFromStack())
-	if rawInput := m.inlineBox.Value(); rawInput != "" {
-		args = append(args, strings.Fields(rawInput)...)
-	}
-
+	args := m.argsFromInlineBox()
 	opts, err := resolveRunOpts(m.root, args)
 	if err != nil {
 		return m, tea.Quit
@@ -365,13 +389,13 @@ func (m model) executeWithPassword() (tea.Model, tea.Cmd) {
 		m.passwordBox = nil
 	}
 
-	proc, err := ansible.RunSubprocess(opts)
+	proc, cleanup, err := ansible.RunSubprocess(opts)
 	if err != nil {
 		return m, tea.Quit
 	}
 
 	commandStr := strings.Join(args, " ")
-	m.execModel = NewExecModel(commandStr, m.version, false, proc, m.width, m.height)
+	m.execModel = NewExecModel(commandStr, m.version, false, proc, cleanup, m.totalTasks, m.width, m.height)
 	m.activeScreen = screenExec
 	m.inlineBox = nil
 

@@ -21,9 +21,20 @@ import (
 	"strings"
 
 	tea "charm.land/bubbletea/v2"
+	"github.com/charmbracelet/x/term"
 	"github.com/spf13/cobra"
 	"github.com/valet-sh/cli/internal/ansible"
 )
+
+// promptPassword prints a password prompt to stderr and reads a masked
+// password from stdin. Called before BubbleTea takes over the terminal.
+// The returned bytes do not include the trailing newline.
+func promptPassword() ([]byte, error) {
+	fmt.Fprint(os.Stderr, "[sudo] Password: ")
+	password, err := term.ReadPassword(os.Stdin.Fd())
+	fmt.Fprintln(os.Stderr) // restore newline after hidden input
+	return password, err
+}
 
 // RunWithPanel executes a valet command via ansible-playbook and shows
 // the live execution panel (header + progress placeholder + log tail).
@@ -49,20 +60,33 @@ func RunWithPanel(root *cobra.Command, args []string, version string) error {
 		return root.Execute()
 	}
 
-	proc, err := ansible.RunSubprocess(opts)
+	// Pre-parse playbook to count tasks for the progress bar.
+	// This runs without sudo and returns 0 on failure (graceful fallback).
+	totalTasks := ansible.ListTasks(opts)
+
+	// Collect sudo password from the terminal before BubbleTea takes over.
+	// The password is then written to a secure temp file and passed to Ansible
+	// via --become-password-file and in extra-vars (to suppress vars_prompt).
+	password, err := promptPassword()
+	if err != nil {
+		return fmt.Errorf("reading password: %w", err)
+	}
+	opts.BecomePassword = password
+
+	proc, cleanup, err := ansible.RunSubprocess(opts)
 	if err != nil {
 		return fmt.Errorf("starting ansible-playbook: %w", err)
 	}
 
 	commandStr := strings.Join(args, " ")
-	return runExecPanel(commandStr, version, proc)
+	return runExecPanel(commandStr, version, proc, cleanup, totalTasks)
 }
 
 // runExecPanel starts a standalone Bubble Tea program showing the execution
 // panel for the given proc. Called for direct CLI invocations (no sidebar).
-func runExecPanel(command, version string, proc *exec.Cmd) error {
+func runExecPanel(command, version string, proc *exec.Cmd, cleanup func(), totalTasks int) error {
 	m := standaloneExecModel{
-		execPanel: NewExecModel(command, version, false, proc, 80, 24),
+		execPanel: NewExecModel(command, version, false, proc, cleanup, totalTasks, 80, 24),
 	}
 
 	p := tea.NewProgram(m)
