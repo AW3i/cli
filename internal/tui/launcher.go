@@ -391,7 +391,7 @@ func (m model) executeWithPassword() (tea.Model, tea.Cmd) {
 	}
 
 	commandStr := strings.Join(args, " ")
-	m.execModel = NewExecModel(commandStr, m.version, false, proc, ansibleOut, cleanup, m.totalTasks, m.width, m.height)
+	m.execModel = NewExecModel(commandStr, m.version, true, proc, ansibleOut, cleanup, m.totalTasks, m.width, m.height)
 	m.activeScreen = screenExec
 	m.inlineBox = nil
 

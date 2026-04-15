@@ -114,12 +114,13 @@ type ExecModel struct {
 	// readTaskCmd reads one such segment and sends it as ansibleTaskMsg.
 	ansibleOut io.Reader
 
-	// logFile is the open debug.log handle seeked to EOF before the run.
+	// logFile is the open debug.log handle.
 	logFile *os.File
 
-	// logReader is a buffered reader over logFile for incremental line reading.
-	// Reused across ticks to maintain file position for subsequent reads.
-	logReader *bufio.Reader
+	// logFileOffset tracks the current read position in the log file.
+	// A fresh bufio.Reader is created each tick starting from this offset
+	// to correctly detect new content appended to the file.
+	logFileOffset int64
 
 	// viewport is the rolling live-log panel shown during execution.
 	viewport viewport.Model
@@ -585,8 +586,9 @@ func (e *ExecModel) appendLines(lines []string) {
 // The log file is opened lazily on first call (after Ansible has started and
 // rotated the log). This avoids the issue where opening the file before the
 // subprocess starts leaves us with a handle to the rotated debug.log.1.
-// Uses a buffered reader that maintains file position across calls so only
-// new lines are returned on each tick.
+// A fresh bufio.Reader is created each tick starting from logFileOffset to
+// correctly detect new content appended to the file (avoiding bufio.Reader
+// state issues when the file grows after EOF).
 func (e *ExecModel) readNewLogLines() []string {
 	// Lazy-open the log file on first call. By this time, Ansible has started
 	// and the callback plugin's logger.handlers[0].doRollover() has already run,
@@ -598,20 +600,31 @@ func (e *ExecModel) readNewLogLines() []string {
 			return nil
 		}
 		e.logFile = f
-		e.logReader = bufio.NewReader(f)
+		e.logFileOffset = 0
 	}
+
+	// Seek to the last known position and create a fresh buffered reader.
+	// This ensures we correctly detect new data appended to the file,
+	// avoiding bufio.Reader internal state caching issues.
+	_, err := e.logFile.Seek(e.logFileOffset, io.SeekStart)
+	if err != nil {
+		return nil
+	}
+	reader := bufio.NewReader(e.logFile)
 
 	var lines []string
 	for {
-		line, err := e.logReader.ReadString('\n')
+		line, err := reader.ReadString('\n')
 		// Trim the newline characters but keep the content.
 		line = strings.TrimRight(line, "\r\n")
 		if line != "" {
 			lines = append(lines, line)
 		}
 		if err != nil {
-			// io.EOF or other error — stop reading, file handle stays at current position
-			// for the next call to pick up new content.
+			// io.EOF or other error — stop reading.
+			// Update offset to resume from here on next tick.
+			pos, _ := e.logFile.Seek(0, io.SeekCurrent)
+			e.logFileOffset = pos
 			break
 		}
 	}
