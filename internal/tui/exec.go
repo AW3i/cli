@@ -120,17 +120,8 @@ type ExecModel struct {
 
 	// currentTask is the human-readable name of the task currently being shown.
 	// Extracted from "TASK [role : task name]" lines.
-	// Updated at a human-readable pace (minimum 250ms) to show what Ansible is doing.
+	// Always shows the most recently discovered task (what Ansible is currently on).
 	currentTask string
-
-	// nextTask is the most recently discovered task name waiting to be shown.
-	// When currentTask has been visible for 250ms+, nextTask becomes currentTask.
-	// This ensures fast tasks each get shown briefly, and slow tasks stay showing.
-	nextTask string
-
-	// lastTaskChangedAt tracks when currentTask was last updated.
-	// Used to enforce a minimum display duration (250ms) per task.
-	lastTaskChangedAt time.Time
 
 	// totalTasks is the total number of tasks that will be executed,
 	// determined by ansible-playbook --list-tasks before the run.
@@ -221,14 +212,6 @@ func (e ExecModel) Update(msg tea.Msg) (ExecModel, tea.Cmd) {
 		if len(lines) > 0 {
 			e.appendLines(lines)
 		}
-		// Advance to nextTask if 250ms+ has passed since last change.
-		// This ensures each task is shown for a human-readable duration,
-		// fast tasks each get brief visibility, slow tasks stay showing.
-		if e.nextTask != "" && time.Since(e.lastTaskChangedAt) >= 250*time.Millisecond {
-			e.currentTask = e.nextTask
-			e.nextTask = ""
-			e.lastTaskChangedAt = time.Now()
-		}
 		if !e.done {
 			e.spinnerFrame++
 			return e, tickCmd()
@@ -244,11 +227,6 @@ func (e ExecModel) Update(msg tea.Msg) (ExecModel, tea.Cmd) {
 		lines := e.readNewLogLines()
 		if len(lines) > 0 {
 			e.appendLines(lines)
-		}
-		// Flush nextTask to show the final task when done.
-		if e.nextTask != "" {
-			e.currentTask = e.nextTask
-			e.nextTask = ""
 		}
 		e.done = true
 		e.err = msg.err
@@ -545,13 +523,8 @@ func (e *ExecModel) appendLine(line string) {
 		e.tasksDone++
 		taskName := parseTaskName(line)
 		if taskName != "" {
-			e.nextTask = taskName
-			// Initialize currentTask on first task if empty
-			if e.currentTask == "" {
-				e.currentTask = taskName
-				e.nextTask = ""
-				e.lastTaskChangedAt = time.Now()
-			}
+			// Always show the most recently discovered task (what Ansible is currently on).
+			e.currentTask = taskName
 		}
 	}
 	current := e.viewport.GetContent()
@@ -571,15 +544,10 @@ func (e *ExecModel) appendLines(lines []string) {
 			e.tasksDone++
 			taskName := parseTaskName(line)
 			if taskName != "" {
-				e.nextTask = taskName
+				// Always show the most recently discovered task (what Ansible is currently on).
+				e.currentTask = taskName
 			}
 		}
-	}
-	// Initialize currentTask on first discovery if empty
-	if e.currentTask == "" && e.nextTask != "" {
-		e.currentTask = e.nextTask
-		e.nextTask = ""
-		e.lastTaskChangedAt = time.Now()
 	}
 	joined := strings.Join(lines, "\n")
 	current := e.viewport.GetContent()
