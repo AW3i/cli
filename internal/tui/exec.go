@@ -103,6 +103,10 @@ type ExecModel struct {
 	// logFile is the open debug.log handle seeked to EOF before the run.
 	logFile *os.File
 
+	// logReader is a buffered reader over logFile for incremental line reading.
+	// Reused across ticks to maintain file position for subsequent reads.
+	logReader *bufio.Reader
+
 	// viewport is the rolling live-log panel shown during execution.
 	viewport viewport.Model
 
@@ -543,6 +547,8 @@ func (e *ExecModel) appendLines(lines []string) {
 // The log file is opened lazily on first call (after Ansible has started and
 // rotated the log). This avoids the issue where opening the file before the
 // subprocess starts leaves us with a handle to the rotated debug.log.1.
+// Uses a buffered reader that maintains file position across calls so only
+// new lines are returned on each tick.
 func (e *ExecModel) readNewLogLines() []string {
 	// Lazy-open the log file on first call. By this time, Ansible has started
 	// and the callback plugin's logger.handlers[0].doRollover() has already run,
@@ -554,12 +560,22 @@ func (e *ExecModel) readNewLogLines() []string {
 			return nil
 		}
 		e.logFile = f
+		e.logReader = bufio.NewReader(f)
 	}
 
 	var lines []string
-	scanner := bufio.NewScanner(e.logFile)
-	for scanner.Scan() {
-		lines = append(lines, scanner.Text())
+	for {
+		line, err := e.logReader.ReadString('\n')
+		// Trim the newline characters but keep the content.
+		line = strings.TrimRight(line, "\r\n")
+		if line != "" {
+			lines = append(lines, line)
+		}
+		if err != nil {
+			// io.EOF or other error — stop reading, file handle stays at current position
+			// for the next call to pick up new content.
+			break
+		}
 	}
 	return lines
 }
