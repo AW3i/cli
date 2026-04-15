@@ -123,6 +123,11 @@ type ExecModel struct {
 	// Used in CLI mode to show the current task being executed.
 	currentTask string
 
+	// taskQueue buffers task names discovered in the log, allowing them to be
+	// displayed sequentially one per tick rather than jumping to the last task
+	// discovered in a batch. This provides a smooth scrolling effect of task names.
+	taskQueue []string
+
 	// totalTasks is the total number of tasks that will be executed,
 	// determined by ansible-playbook --list-tasks before the run.
 	// Zero means the count is unknown (e.g. --list-tasks failed), so we
@@ -212,6 +217,12 @@ func (e ExecModel) Update(msg tea.Msg) (ExecModel, tea.Cmd) {
 		if len(lines) > 0 {
 			e.appendLines(lines)
 		}
+		// Dequeue one task per tick to show tasks sequentially.
+		// This creates a smooth scrolling effect instead of jumping to the last task.
+		if len(e.taskQueue) > 0 {
+			e.currentTask = e.taskQueue[0]
+			e.taskQueue = e.taskQueue[1:]
+		}
 		if !e.done {
 			e.spinnerFrame++
 			return e, tickCmd()
@@ -227,6 +238,11 @@ func (e ExecModel) Update(msg tea.Msg) (ExecModel, tea.Cmd) {
 		lines := e.readNewLogLines()
 		if len(lines) > 0 {
 			e.appendLines(lines)
+		}
+		// Flush any remaining queued tasks to show the final task when done.
+		if len(e.taskQueue) > 0 {
+			e.currentTask = e.taskQueue[len(e.taskQueue)-1]
+			e.taskQueue = nil
 		}
 		e.done = true
 		e.err = msg.err
@@ -517,7 +533,14 @@ func parseTaskName(line string) string {
 func (e *ExecModel) appendLine(line string) {
 	if strings.HasPrefix(line, taskLogPrefix) {
 		e.tasksDone++
-		e.currentTask = parseTaskName(line)
+		taskName := parseTaskName(line)
+		if taskName != "" {
+			e.taskQueue = append(e.taskQueue, taskName)
+		}
+		// Initialize currentTask on first task if empty
+		if e.currentTask == "" && len(e.taskQueue) > 0 {
+			e.currentTask = e.taskQueue[0]
+		}
 	}
 	current := e.viewport.GetContent()
 	if current == "" {
@@ -534,8 +557,15 @@ func (e *ExecModel) appendLines(lines []string) {
 	for _, line := range lines {
 		if strings.HasPrefix(line, taskLogPrefix) {
 			e.tasksDone++
-			e.currentTask = parseTaskName(line)
+			taskName := parseTaskName(line)
+			if taskName != "" {
+				e.taskQueue = append(e.taskQueue, taskName)
+			}
 		}
+	}
+	// Initialize currentTask on first discovery if empty
+	if e.currentTask == "" && len(e.taskQueue) > 0 {
+		e.currentTask = e.taskQueue[0]
 	}
 	joined := strings.Join(lines, "\n")
 	current := e.viewport.GetContent()
