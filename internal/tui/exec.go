@@ -118,15 +118,19 @@ type ExecModel struct {
 	// by detecting "TASK [" lines in the rolling log output.
 	tasksDone int
 
-	// currentTask is the human-readable name of the current/last task.
+	// currentTask is the human-readable name of the task currently being shown.
 	// Extracted from "TASK [role : task name]" lines.
-	// Used in CLI mode to show the current task being executed.
+	// Updated at a human-readable pace (minimum 250ms) to show what Ansible is doing.
 	currentTask string
 
-	// taskQueue buffers task names discovered in the log, allowing them to be
-	// displayed sequentially one per tick rather than jumping to the last task
-	// discovered in a batch. This provides a smooth scrolling effect of task names.
-	taskQueue []string
+	// nextTask is the most recently discovered task name waiting to be shown.
+	// When currentTask has been visible for 250ms+, nextTask becomes currentTask.
+	// This ensures fast tasks each get shown briefly, and slow tasks stay showing.
+	nextTask string
+
+	// lastTaskChangedAt tracks when currentTask was last updated.
+	// Used to enforce a minimum display duration (250ms) per task.
+	lastTaskChangedAt time.Time
 
 	// totalTasks is the total number of tasks that will be executed,
 	// determined by ansible-playbook --list-tasks before the run.
@@ -137,11 +141,6 @@ type ExecModel struct {
 	// spinnerFrame is the current index into the spinner animation frames.
 	// Advances on every execTickMsg while the process is running.
 	spinnerFrame int
-
-	// taskQueueTick counts execTickMsg events to pace task queue draining.
-	// Dequeues one task every 5 ticks (250ms) to create human-readable
-	// pacing instead of exhausting the queue too quickly.
-	taskQueueTick int
 
 	// done is true once the subprocess has exited.
 	done bool
@@ -222,13 +221,13 @@ func (e ExecModel) Update(msg tea.Msg) (ExecModel, tea.Cmd) {
 		if len(lines) > 0 {
 			e.appendLines(lines)
 		}
-		// Dequeue one task every 5 ticks (250ms) to show tasks at human-readable pace.
-		// Prevents the queue from draining too fast and leaving the display frozen
-		// between long-running tasks.
-		e.taskQueueTick++
-		if e.taskQueueTick%5 == 0 && len(e.taskQueue) > 0 {
-			e.currentTask = e.taskQueue[0]
-			e.taskQueue = e.taskQueue[1:]
+		// Advance to nextTask if 250ms+ has passed since last change.
+		// This ensures each task is shown for a human-readable duration,
+		// fast tasks each get brief visibility, slow tasks stay showing.
+		if e.nextTask != "" && time.Since(e.lastTaskChangedAt) >= 250*time.Millisecond {
+			e.currentTask = e.nextTask
+			e.nextTask = ""
+			e.lastTaskChangedAt = time.Now()
 		}
 		if !e.done {
 			e.spinnerFrame++
@@ -246,10 +245,10 @@ func (e ExecModel) Update(msg tea.Msg) (ExecModel, tea.Cmd) {
 		if len(lines) > 0 {
 			e.appendLines(lines)
 		}
-		// Flush any remaining queued tasks to show the final task when done.
-		if len(e.taskQueue) > 0 {
-			e.currentTask = e.taskQueue[len(e.taskQueue)-1]
-			e.taskQueue = nil
+		// Flush nextTask to show the final task when done.
+		if e.nextTask != "" {
+			e.currentTask = e.nextTask
+			e.nextTask = ""
 		}
 		e.done = true
 		e.err = msg.err
@@ -346,12 +345,16 @@ func (e ExecModel) handleKey(msg tea.KeyPressMsg) (ExecModel, tea.Cmd) {
 		return e, cmd
 	}
 
-	// Done with error — show prompt on first key press (unless it's ctrl+c).
+	// Done with error — show prompt on first key press (unless it's ctrl+c or y/Y).
 	if e.err != nil && !e.awaitingLogPrompt {
 		if key == "ctrl+c" || key == "esc" || key == "q" {
 			return e, tea.Quit
 		}
-		// User pressed a key on error — show the prompt.
+		// If user presses y/Y, skip the prompt and open the log directly.
+		if key == "y" || key == "Y" {
+			return e, loadLogCmd()
+		}
+		// Any other key: show the prompt and wait for response.
 		e.awaitingLogPrompt = true
 		e.viewport.SetHeight(execViewportHeight(e.height, true))
 		return e, nil
@@ -542,11 +545,13 @@ func (e *ExecModel) appendLine(line string) {
 		e.tasksDone++
 		taskName := parseTaskName(line)
 		if taskName != "" {
-			e.taskQueue = append(e.taskQueue, taskName)
-		}
-		// Initialize currentTask on first task if empty
-		if e.currentTask == "" && len(e.taskQueue) > 0 {
-			e.currentTask = e.taskQueue[0]
+			e.nextTask = taskName
+			// Initialize currentTask on first task if empty
+			if e.currentTask == "" {
+				e.currentTask = taskName
+				e.nextTask = ""
+				e.lastTaskChangedAt = time.Now()
+			}
 		}
 	}
 	current := e.viewport.GetContent()
@@ -566,13 +571,15 @@ func (e *ExecModel) appendLines(lines []string) {
 			e.tasksDone++
 			taskName := parseTaskName(line)
 			if taskName != "" {
-				e.taskQueue = append(e.taskQueue, taskName)
+				e.nextTask = taskName
 			}
 		}
 	}
 	// Initialize currentTask on first discovery if empty
-	if e.currentTask == "" && len(e.taskQueue) > 0 {
-		e.currentTask = e.taskQueue[0]
+	if e.currentTask == "" && e.nextTask != "" {
+		e.currentTask = e.nextTask
+		e.nextTask = ""
+		e.lastTaskChangedAt = time.Now()
 	}
 	joined := strings.Join(lines, "\n")
 	current := e.viewport.GetContent()
