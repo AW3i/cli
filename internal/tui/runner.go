@@ -81,8 +81,14 @@ func RunWithPanel(root *cobra.Command, args []string, version string) error {
 // runExecPanel starts a standalone Bubble Tea program showing the execution
 // panel for the given proc. Called for direct CLI invocations (no sidebar).
 func runExecPanel(command, version string, proc *exec.Cmd, cleanup func(), totalTasks int) error {
+	// Get terminal size with fallback to 80x24.
+	width, height := 80, 24
+	if w, h, err := term.GetSize(os.Stdout.Fd()); err == nil {
+		width, height = w, h
+	}
+
 	m := standaloneExecModel{
-		execPanel: NewExecModel(command, version, false, proc, cleanup, totalTasks, 80, 24),
+		execPanel: NewExecModel(command, version, false, proc, cleanup, totalTasks, width, height),
 	}
 
 	p := tea.NewProgram(m)

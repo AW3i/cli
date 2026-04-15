@@ -114,6 +114,11 @@ type ExecModel struct {
 	// by detecting "TASK [" lines in the rolling log output.
 	tasksDone int
 
+	// currentTask is the human-readable name of the current/last task.
+	// Extracted from "TASK [role : task name]" lines.
+	// Used in CLI mode to show the current task being executed.
+	currentTask string
+
 	// totalTasks is the total number of tasks that will be executed,
 	// determined by ansible-playbook --list-tasks before the run.
 	// Zero means the count is unknown (e.g. --list-tasks failed), so we
@@ -330,7 +335,44 @@ func (e ExecModel) View() string {
 	if e.logViewOpen {
 		return e.logViewerView()
 	}
+	if !e.withSidebar {
+		return e.cliView()
+	}
 	return e.execView()
+}
+
+// cliView renders the minimal CLI view: command header, spinner line, and optional error prompt.
+// Used in standalone CLI mode (no sidebar, no viewport of log lines).
+func (e ExecModel) cliView() string {
+	var output strings.Builder
+
+	// Header: command being run + version.
+	cmdLabel := styles.Header.Render("▶ valet.sh " + e.command)
+	versionLabel := styles.Version.Render("v" + e.version)
+	versionPadding := e.width - lipgloss.Width(cmdLabel) - lipgloss.Width(versionLabel) - 2
+	if versionPadding < 1 {
+		versionPadding = 1
+	}
+	_, _ = fmt.Fprintln(&output, cmdLabel+strings.Repeat(" ", versionPadding)+versionLabel)
+
+	// Spinner line: shows current task while running, checkmark/cross when done.
+	_, _ = fmt.Fprintln(&output, e.progressBarView())
+
+	// On error: show hint or prompt.
+	if e.done && e.err != nil {
+		if e.awaitingLogPrompt {
+			promptLine := styles.HelpDesc.Render("View full log? ") +
+				styles.HelpKey.Render("[Y]") +
+				styles.HelpDesc.Render("/") +
+				styles.ItemDim.Render("n")
+			_, _ = fmt.Fprint(&output, promptLine)
+		} else {
+			hintLine := styles.HelpDesc.Render("(press y to view log, q to exit)")
+			_, _ = fmt.Fprint(&output, hintLine)
+		}
+	}
+
+	return output.String()
 }
 
 // execView renders the live execution panel.
@@ -394,7 +436,7 @@ func (e ExecModel) logViewerView() string {
 var spinnerFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
 
 // progressBarView renders the progress indicator line between the header and
-// the log viewport. Shows a spinner with task count while running, checkmark or
+// the log viewport. Shows a spinner with current task while running, checkmark or
 // cross when done.
 func (e ExecModel) progressBarView() string {
 	if e.done {
@@ -411,7 +453,13 @@ func (e ExecModel) progressBarView() string {
 	// Always show spinner while running.
 	frame := spinnerFrames[e.spinnerFrame%len(spinnerFrames)]
 	spinner := styles.HelpKey.Render(frame)
-	counter := styles.HelpDesc.Render(fmt.Sprintf("  %d tasks", e.tasksDone))
+
+	// Show current task if available, otherwise show "running..."
+	taskDisplay := e.currentTask
+	if taskDisplay == "" {
+		taskDisplay = "running..."
+	}
+	counter := styles.HelpDesc.Render("  " + taskDisplay)
 	return spinner + counter
 }
 
@@ -445,10 +493,23 @@ func (e ExecModel) IsDone() bool { return e.done }
 // Err returns the subprocess exit error, if any.
 func (e ExecModel) Err() error { return e.err }
 
+// parseTaskName extracts the task name from a "TASK [role : task name]" line.
+// Input example: "TASK [shared-variables : set 'current_os' var] ****..."
+// Returns: "shared-variables : set 'current_os' var"
+func parseTaskName(line string) string {
+	start := strings.Index(line, "[")
+	end := strings.Index(line, "]")
+	if start == -1 || end == -1 || start >= end {
+		return ""
+	}
+	return strings.TrimSpace(line[start+1 : end])
+}
+
 // appendLine appends a single line to the live viewport and counts tasks.
 func (e *ExecModel) appendLine(line string) {
 	if strings.HasPrefix(line, taskLogPrefix) {
 		e.tasksDone++
+		e.currentTask = parseTaskName(line)
 	}
 	current := e.viewport.GetContent()
 	if current == "" {
@@ -465,6 +526,7 @@ func (e *ExecModel) appendLines(lines []string) {
 	for _, line := range lines {
 		if strings.HasPrefix(line, taskLogPrefix) {
 			e.tasksDone++
+			e.currentTask = parseTaskName(line)
 		}
 	}
 	joined := strings.Join(lines, "\n")
