@@ -308,6 +308,15 @@ func (e ExecModel) handleKey(msg tea.KeyPressMsg) (ExecModel, tea.Cmd) {
 	// Still running — scroll viewport or handle ctrl+c.
 	if !e.done {
 		if key == "ctrl+c" {
+			// Signal the subprocess to terminate.
+			if e.proc != nil && e.proc.Process != nil {
+				_ = e.proc.Process.Signal(os.Interrupt)
+			}
+			// Clean up temp files immediately (prevent double-call from execDoneMsg).
+			if e.cleanup != nil {
+				e.cleanup()
+				e.cleanup = nil
+			}
 			return e, tea.Quit
 		}
 		var cmd tea.Cmd
