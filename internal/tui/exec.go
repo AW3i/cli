@@ -496,6 +496,9 @@ func (e ExecModel) progressBarView() string {
 	taskDisplay := e.currentTask
 	if taskDisplay == "" {
 		taskDisplay = "running..."
+	} else {
+		// Shorten the task name to show only the description part (after | or :)
+		taskDisplay = shortTaskName(taskDisplay)
 	}
 	counter := styles.HelpDesc.Render("  " + taskDisplay)
 	return spinner + counter
@@ -532,13 +535,15 @@ func (e ExecModel) IsDone() bool { return e.done }
 func (e ExecModel) Err() error { return e.err }
 
 // appendLine appends a single line to the live viewport and counts tasks.
-// When a TASK line is found, currentTask is updated to the task name.
+// When a TASK line is found, currentTask is updated to the task name
+// (unless it's a meta-task like include_tasks which should be skipped).
 func (e *ExecModel) appendLine(line string) {
 	if strings.HasPrefix(line, taskLogPrefix) {
 		e.tasksDone++
 		// Extract and display the current task name.
 		// This is the primary source; the ansibleTaskMsg (stdout pipe) is secondary.
-		if taskName := parseLogTaskName(line); taskName != "" {
+		// Skip meta-tasks (include_tasks, import_tasks, etc.) — they're not real work.
+		if taskName := parseLogTaskName(line); taskName != "" && !isMetaTask(taskName) {
 			e.currentTask = taskName
 		}
 	}
@@ -553,13 +558,15 @@ func (e *ExecModel) appendLine(line string) {
 
 // appendLines appends multiple lines to the live viewport in one call,
 // counting tasks as they appear and updating currentTask.
+// Meta-tasks (like include_tasks) are skipped to avoid showing transient control-flow tasks.
 func (e *ExecModel) appendLines(lines []string) {
 	for _, line := range lines {
 		if strings.HasPrefix(line, taskLogPrefix) {
 			e.tasksDone++
-			// Update to the most recent task in this batch.
-			// This ensures currentTask reflects the latest TASK line found.
-			if taskName := parseLogTaskName(line); taskName != "" {
+			// Update to the most recent non-meta task in this batch.
+			// Skip include_tasks, import_tasks, etc. — they're not real work.
+			// This ensures currentTask reflects the latest real task found.
+			if taskName := parseLogTaskName(line); taskName != "" && !isMetaTask(taskName) {
 				e.currentTask = taskName
 			}
 		}
@@ -814,4 +821,52 @@ func IsTTY() bool {
 		return false
 	}
 	return (fi.Mode() & os.ModeCharDevice) != 0
+}
+
+// isMetaTask returns true if the task name represents an Ansible meta-task
+// that controls flow (include_tasks, import_tasks, etc.) rather than doing real work.
+// These tasks execute instantly and should not be shown as "current task" since
+// the real work happens in the included/imported file.
+func isMetaTask(taskName string) bool {
+	// Extract the task name part (after the last " : " if role-qualified)
+	base := taskName
+	if i := strings.LastIndex(taskName, " : "); i >= 0 {
+		base = taskName[i+3:]
+	}
+
+	// Check if it's a meta-task
+	switch base {
+	case "include_tasks", "import_tasks", "include_role", "import_role":
+		return true
+	}
+	return false
+}
+
+// shortTaskName extracts the meaningful description part of a task name
+// by removing the role prefix and keeping only the task description.
+//
+// Examples:
+//
+//	"valet-init-instance : workflows » magento2 » services » php | ensure php8.3 is started"
+//	→ "ensure php8.3 is started"
+//
+//	"shared-variables : set 'current_os' var"
+//	→ "set 'current_os' var"
+//
+//	"Gathering Facts"
+//	→ "Gathering Facts"
+func shortTaskName(taskName string) string {
+	// If the task has a pipe separator, use what comes after it
+	// (e.g., "role : workflows » ... | task description" → "task description")
+	if i := strings.LastIndex(taskName, " | "); i >= 0 {
+		return strings.TrimSpace(taskName[i+3:])
+	}
+
+	// No pipe — try to strip the role prefix (e.g., "role : task" → "task")
+	if i := strings.Index(taskName, " : "); i >= 0 {
+		return strings.TrimSpace(taskName[i+3:])
+	}
+
+	// No role prefix (e.g., "Gathering Facts" or "set variables")
+	return taskName
 }

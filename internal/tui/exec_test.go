@@ -234,11 +234,12 @@ func TestExecModelProgressBarRendering(t *testing.T) {
 		done        bool
 		err         error
 		currentTask string
+		expectedIn  string // What we expect to find in the view (after shortening)
 	}{
-		{"spinner with no task", 5, 0, false, nil, ""},
-		{"spinner with task", 10, 20, false, nil, "my : task"},
-		{"success state", 20, 20, true, nil, ""},
-		{"failure state", 15, 20, true, errors.New("fail"), ""},
+		{"spinner with no task", 5, 0, false, nil, "", "running..."},
+		{"spinner with task", 10, 20, false, nil, "my : task", "task"}, // "my : task" gets shortened to "task"
+		{"success state", 20, 20, true, nil, "", "✔"},
+		{"failure state", 15, 20, true, errors.New("fail"), "", "✘"},
 	}
 
 	for _, tc := range tests {
@@ -251,29 +252,8 @@ func TestExecModelProgressBarRendering(t *testing.T) {
 
 			view := m.progressBarView()
 
-			if tc.done {
-				// Done states show checkmark or X.
-				if tc.err != nil {
-					if !strings.Contains(view, "✘") {
-						t.Errorf("expected failure marker in view, got: %s", view)
-					}
-				} else {
-					if !strings.Contains(view, "✔") {
-						t.Errorf("expected success marker in view, got: %s", view)
-					}
-				}
-				return
-			}
-
-			// Running: should show task name (or "running..." fallback).
-			if tc.currentTask != "" {
-				if !strings.Contains(view, tc.currentTask) {
-					t.Errorf("expected task name %q in view, got: %s", tc.currentTask, view)
-				}
-			} else {
-				if !strings.Contains(view, "running...") {
-					t.Errorf("expected 'running...' fallback in view, got: %s", view)
-				}
+			if !strings.Contains(view, tc.expectedIn) {
+				t.Errorf("expected %q in view, got: %s", tc.expectedIn, view)
 			}
 		})
 	}
@@ -281,14 +261,16 @@ func TestExecModelProgressBarRendering(t *testing.T) {
 
 func TestExecModelRenderProgressBarCalculations(t *testing.T) {
 	// The progress bar shows spinner + task name. Verify task name appears correctly.
+	// Note: task names are shortened to remove role prefix.
 	tasks := []struct {
 		tasksDone  int
 		totalTasks int
 		task       string
+		expectedIn string // What should appear in the view (shortened)
 	}{
-		{0, 20, "first : task"},
-		{10, 20, "middle : task"},
-		{20, 20, "last : task"},
+		{0, 20, "first : task", "task"},   // Shortened from "first : task"
+		{10, 20, "middle : task", "task"}, // Shortened from "middle : task"
+		{20, 20, "last : task", "task"},   // Shortened from "last : task"
 	}
 
 	for _, tc := range tasks {
@@ -299,22 +281,23 @@ func TestExecModelRenderProgressBarCalculations(t *testing.T) {
 
 			view := m.progressBarView()
 
-			if !strings.Contains(view, tc.task) {
-				t.Errorf("expected task %q in progress bar view, got: %s", tc.task, view)
+			if !strings.Contains(view, tc.expectedIn) {
+				t.Errorf("expected %q in progress bar view, got: %s", tc.expectedIn, view)
 			}
 		})
 	}
 }
 
 func TestExecModelProgressBarView(t *testing.T) {
-	// While running: should show spinner + task name.
+	// While running: should show spinner + task name (shortened).
 	m := NewExecModel("install", "1.0.0", false, nil, nil, nil, 20, 80, 24)
 	m.tasksDone = 10
 	m.currentTask = "some : task name"
 
 	view := m.progressBarView()
-	if !strings.Contains(view, "some : task name") {
-		t.Errorf("expected task name in progress bar, got: %s", view)
+	// Task name gets shortened to just "task name"
+	if !strings.Contains(view, "task name") {
+		t.Errorf("expected shortened task name in progress bar, got: %s", view)
 	}
 
 	// When done with success: should show checkmark.
@@ -496,5 +479,150 @@ func TestReadTaskCmdSkipsFlushLines(t *testing.T) {
 	}
 	if string(taskMsg) != "my : task name" {
 		t.Errorf("expected %q, got %q", "my : task name", string(taskMsg))
+	}
+}
+
+func TestIsMetaTask(t *testing.T) {
+	// Test meta-task detection
+	tests := []struct {
+		name       string
+		input      string
+		isMetaTask bool
+	}{
+		{
+			name:       "include_tasks is meta",
+			input:      "valet-init-instance : include_tasks",
+			isMetaTask: true,
+		},
+		{
+			name:       "import_tasks is meta",
+			input:      "valet-init-instance : import_tasks",
+			isMetaTask: true,
+		},
+		{
+			name:       "include_role is meta",
+			input:      "some-role : include_role",
+			isMetaTask: true,
+		},
+		{
+			name:       "import_role is meta",
+			input:      "some-role : import_role",
+			isMetaTask: true,
+		},
+		{
+			name:       "include_tasks without role is meta",
+			input:      "include_tasks",
+			isMetaTask: true,
+		},
+		{
+			name:       "real task is not meta",
+			input:      "valet-init-instance : ensure elasticsearch is started",
+			isMetaTask: false,
+		},
+		{
+			name:       "task with pipe separator is not meta",
+			input:      "valet-init-instance : workflows » magento2 » services » php | ensure php8.3 is started",
+			isMetaTask: false,
+		},
+		{
+			name:       "Gathering Facts is not meta",
+			input:      "Gathering Facts",
+			isMetaTask: false,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := isMetaTask(tc.input)
+			if got != tc.isMetaTask {
+				t.Errorf("isMetaTask(%q) = %v, want %v", tc.input, got, tc.isMetaTask)
+			}
+		})
+	}
+}
+
+func TestShortTaskName(t *testing.T) {
+	// Test task name shortening
+	tests := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{
+			name:  "role-qualified with pipe separator",
+			input: "valet-init-instance : workflows » magento2 » services » php | ensure php8.3 is started",
+			want:  "ensure php8.3 is started",
+		},
+		{
+			name:  "role-qualified without pipe",
+			input: "shared-variables : set 'current_os' var",
+			want:  "set 'current_os' var",
+		},
+		{
+			name:  "Gathering Facts",
+			input: "Gathering Facts",
+			want:  "Gathering Facts",
+		},
+		{
+			name:  "include_tasks with role",
+			input: "valet-init-instance : include_tasks",
+			want:  "include_tasks",
+		},
+		{
+			name:  "long workflow task",
+			input: "valet-init-instance : workflows » magento2 » services » elasticsearch | wait for elasticsearch to be reachable",
+			want:  "wait for elasticsearch to be reachable",
+		},
+		{
+			name:  "empty after pipe (keep full)",
+			input: "valet-init-instance : some task | ",
+			want:  "",
+		},
+		{
+			name:  "multiple pipes (last one wins)",
+			input: "valet-init-instance : task | part 1 | part 2",
+			want:  "part 2",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := shortTaskName(tc.input)
+			if got != tc.want {
+				t.Errorf("shortTaskName(%q) = %q, want %q", tc.input, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestAppendLinesSkipsMetaTasks(t *testing.T) {
+	// Test that include_tasks doesn't update currentTask if a real task came before
+	m := NewExecModel("install", "1.0.0", false, nil, nil, nil, 10, 80, 24)
+
+	// First, set a real task
+	m.appendLine("TASK [some-role : ensure service is started] ****")
+	realTask := m.currentTask
+	if realTask == "" {
+		t.Fatal("expected currentTask to be set to real task")
+	}
+
+	// Then try to append include_tasks
+	m.appendLine("TASK [some-role : include_tasks] ****")
+
+	// currentTask should NOT change (still the real task)
+	if m.currentTask != realTask {
+		t.Errorf("currentTask changed from %q to %q when include_tasks was processed", realTask, m.currentTask)
+	}
+
+	// Batch append with real task AFTER include_tasks
+	m.appendLines([]string{
+		"some output",
+		"TASK [some-role : include_tasks] ****",
+		"TASK [workflow : real work | do important thing] ****",
+	})
+
+	// currentTask should be the real task after include_tasks
+	if !strings.Contains(m.currentTask, "do important thing") {
+		t.Errorf("expected currentTask to be 'do important thing' task, got %q", m.currentTask)
 	}
 }
