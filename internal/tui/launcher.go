@@ -474,21 +474,25 @@ func (m model) render() string {
 
 	_, _ = fmt.Fprintln(&output, m.headerView())
 	_, _ = fmt.Fprintln(&output, dividerLine(m.width))
-	_, _ = fmt.Fprintln(&output, renderHorizontalList(m.commandList, m.width))
 
 	switch {
 	case m.activeScreen == screenPassword && m.passwordBox != nil:
-		_, _ = fmt.Fprintln(&output, m.passwordBox.View())
+		// Focused password screen: hide command list, show only password input
+		_, _ = fmt.Fprintln(&output, "  "+m.passwordBox.InputView())
 		_, _ = fmt.Fprintln(&output, dividerLine(m.width))
 		_, _ = fmt.Fprint(&output,
 			styles.HelpKey.Render("↵")+styles.HelpDesc.Render(" confirm")+" · "+
-				styles.HelpKey.Render("esc")+styles.HelpDesc.Render(" back"),
+				styles.HelpKey.Render("esc")+styles.HelpDesc.Render(" back")+" · "+
+				m.passwordBox.View(),
 		)
 	case m.activeScreen == screenInline && m.inlineBox != nil:
+		_, _ = fmt.Fprintln(&output, renderHorizontalList(m.commandList, m.width))
 		_, _ = fmt.Fprintln(&output, m.inlineBox.View())
 		_, _ = fmt.Fprintln(&output, dividerLine(m.width))
 		_, _ = fmt.Fprint(&output, renderInlineHelpBar(m.width))
 	default:
+		// Show command list for screenList
+		_, _ = fmt.Fprintln(&output, renderHorizontalList(m.commandList, m.width))
 		// Show filter input line when actively filtering.
 		if m.commandList.FilterState() == list.Filtering {
 			_, _ = fmt.Fprintln(&output, "  "+m.commandList.FilterInput.View())
@@ -506,21 +510,23 @@ func (m model) headerView() string {
 		crumbs[i] = m.stack[i].title
 	}
 	breadcrumb := strings.Join(crumbs, " › ")
+
+	// For screenPassword, extend the breadcrumb to include the full command args.
+	// e.g., "valet.sh › service › restart nginx"
+	if m.activeScreen == screenPassword && m.passwordBox != nil {
+		breadcrumb = breadcrumb + " › " + m.passwordBox.command
+	}
+
 	title := styles.Header.Render("▶ " + breadcrumb)
 
 	// Right side of the title — changes based on state:
 	// - screenInline:   show the live textinput ("valet.sh db █")
-	// - screenPassword: show the command being run (dim, locked)
 	// - screenList:     show dim ghost text of the hovered command
 	var titleSuffix string
 	switch m.activeScreen {
 	case screenInline:
 		if m.inlineBox != nil {
 			titleSuffix = "  " + m.inlineBox.InputView()
-		}
-	case screenPassword:
-		if m.passwordBox != nil {
-			titleSuffix = "  " + styles.GhostCommand.Render(m.passwordBox.command)
 		}
 	case screenList:
 		if sel, ok := m.commandList.SelectedItem().(CommandItem); ok && !sel.IsBack {
