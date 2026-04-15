@@ -16,6 +16,7 @@ package tui
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"strings"
@@ -69,18 +70,18 @@ func RunWithPanel(root *cobra.Command, args []string, version string) error {
 	}
 	opts.BecomePassword = password
 
-	proc, cleanup, err := ansible.RunSubprocess(opts)
+	proc, ansibleOut, cleanup, err := ansible.RunSubprocess(opts)
 	if err != nil {
 		return fmt.Errorf("starting ansible-playbook: %w", err)
 	}
 
 	commandStr := strings.Join(args, " ")
-	return runExecPanel(commandStr, version, proc, cleanup, 0)
+	return runExecPanel(commandStr, version, proc, ansibleOut, cleanup, 0)
 }
 
 // runExecPanel starts a standalone Bubble Tea program showing the execution
 // panel for the given proc. Called for direct CLI invocations (no sidebar).
-func runExecPanel(command, version string, proc *exec.Cmd, cleanup func(), totalTasks int) error {
+func runExecPanel(command, version string, proc *exec.Cmd, ansibleOut io.Reader, cleanup func(), totalTasks int) error {
 	// Get terminal size with fallback to 80x24.
 	width, height := 80, 24
 	if w, h, err := term.GetSize(os.Stdout.Fd()); err == nil {
@@ -88,7 +89,7 @@ func runExecPanel(command, version string, proc *exec.Cmd, cleanup func(), total
 	}
 
 	m := standaloneExecModel{
-		execPanel: NewExecModel(command, version, false, proc, cleanup, totalTasks, width, height),
+		execPanel: NewExecModel(command, version, false, proc, ansibleOut, cleanup, totalTasks, width, height),
 	}
 
 	p := tea.NewProgram(m)

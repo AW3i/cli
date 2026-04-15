@@ -22,6 +22,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -154,13 +155,16 @@ func Run(opts *RunOpts) error {
 // exit status — used by the TUI execution panel which needs the Go process
 // to stay alive for log tailing and rendering.
 //
-// stdout and stderr are discarded because the Ansible callback plugin writes
-// all output to the log file; the TUI tails that file directly.
-
-func RunSubprocess(opts *RunOpts) (*exec.Cmd, func(), error) {
+// The Ansible callback plugin writes spinner lines ("⠙ taskname\r") to stdout
+// for every task start. RunSubprocess pipes that stdout so the TUI can read
+// task names in real time without parsing the log file.
+// stderr is discarded; structured output goes to the log file.
+//
+// Returns the started process, a reader for its stdout, and a cleanup func.
+func RunSubprocess(opts *RunOpts) (*exec.Cmd, io.Reader, func(), error) {
 	playbookPath := filepath.Join(platform.RepoDir(), "playbooks", opts.Playbook+".yml")
 	if _, err := os.Stat(playbookPath); err != nil {
-		return nil, nil, fmt.Errorf("playbook not found: %s", playbookPath)
+		return nil, nil, nil, fmt.Errorf("playbook not found: %s", playbookPath)
 	}
 
 	workDir := opts.WorkDir
@@ -168,7 +172,7 @@ func RunSubprocess(opts *RunOpts) (*exec.Cmd, func(), error) {
 		var err error
 		workDir, err = os.Getwd()
 		if err != nil {
-			return nil, nil, fmt.Errorf("getting working directory: %w", err)
+			return nil, nil, nil, fmt.Errorf("getting working directory: %w", err)
 		}
 	}
 
@@ -201,7 +205,7 @@ func RunSubprocess(opts *RunOpts) (*exec.Cmd, func(), error) {
 		bpf, err := writeSecretFile(opts.BecomePassword)
 		if err != nil {
 			cleanup()
-			return nil, nil, fmt.Errorf("writing become-password-file: %w", err)
+			return nil, nil, nil, fmt.Errorf("writing become-password-file: %w", err)
 		}
 		becomePasswordFile = bpf
 		tmpFiles = append(tmpFiles, bpf)
@@ -216,7 +220,7 @@ func RunSubprocess(opts *RunOpts) (*exec.Cmd, func(), error) {
 	extraVarsJSON, err := json.Marshal(extraVars)
 	if err != nil {
 		cleanup()
-		return nil, nil, fmt.Errorf("serializing extra vars: %w", err)
+		return nil, nil, nil, fmt.Errorf("serializing extra vars: %w", err)
 	}
 
 	ansibleBin := platform.AnsiblePlaybookBin()
@@ -227,7 +231,7 @@ func RunSubprocess(opts *RunOpts) (*exec.Cmd, func(), error) {
 	evFile, err := writeSecretFile(extraVarsJSON)
 	if err != nil {
 		cleanup()
-		return nil, nil, fmt.Errorf("writing extra-vars file: %w", err)
+		return nil, nil, nil, fmt.Errorf("writing extra-vars file: %w", err)
 	}
 	tmpFiles = append(tmpFiles, evFile)
 	args = append(args, "-e", "@"+evFile)
@@ -250,22 +254,31 @@ func RunSubprocess(opts *RunOpts) (*exec.Cmd, func(), error) {
 	devNull, err := os.Open(os.DevNull)
 	if err != nil {
 		cleanup()
-		return nil, nil, fmt.Errorf("opening /dev/null: %w", err)
+		return nil, nil, nil, fmt.Errorf("opening /dev/null: %w", err)
 	}
 	cmd.Stdin = devNull
 
-	cmd.Stdout = nil
+	// Pipe stdout so the TUI can read task names in real time.
+	// The callback plugin prints "⠙ taskname\r" to stdout for each task start.
+	// StdoutPipe must be called before Start; it returns a reader that is
+	// automatically closed when cmd.Wait() is called by waitForProcess.
+	stdoutPipe, err := cmd.StdoutPipe()
+	if err != nil {
+		devNull.Close()
+		cleanup()
+		return nil, nil, nil, fmt.Errorf("creating stdout pipe: %w", err)
+	}
 	cmd.Stderr = nil
 
 	if err = cmd.Start(); err != nil {
 		devNull.Close()
 		cleanup()
-		return nil, nil, fmt.Errorf("starting ansible-playbook: %w", err)
+		return nil, nil, nil, fmt.Errorf("starting ansible-playbook: %w", err)
 	}
 
 	devNull.Close()
 
-	return cmd, cleanup, nil
+	return cmd, stdoutPipe, cleanup, nil
 }
 
 // ListTasks runs ansible-playbook --list-tasks to count how many tasks
