@@ -226,6 +226,10 @@ func (e ExecModel) Update(msg tea.Msg) (ExecModel, tea.Cmd) {
 		if e.cleanup != nil {
 			e.cleanup()
 		}
+		// In CLI mode (no sidebar): exit immediately on success.
+		if !e.withSidebar && e.err == nil {
+			return e, tea.Quit
+		}
 		// On failure: user must press a key first, then we show the prompt.
 		// Don't resize viewport yet — we'll do that on first keypress if needed.
 		return e, nil
