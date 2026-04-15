@@ -122,6 +122,7 @@ func (standalone standaloneExecModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 func (standalone standaloneExecModel) View() tea.View {
 	v := tea.NewView(standalone.execPanel.View())
+	v.MouseMode = tea.MouseModeCellMotion
 	return v
 }
 

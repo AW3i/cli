@@ -458,7 +458,9 @@ func (m model) resizeAll() model {
 // View renders the full TUI.
 // No alt-screen — renders inline below the cursor like fzf.
 func (m model) View() tea.View {
-	return tea.NewView(m.render())
+	v := tea.NewView(m.render())
+	v.MouseMode = tea.MouseModeCellMotion
+	return v
 }
 
 func (m model) render() string {
