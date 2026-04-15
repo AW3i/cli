@@ -194,12 +194,12 @@ func (e ExecModel) SetSize(width, height int) ExecModel {
 }
 
 // Init starts the log poller and the process waiter.
-// Immediately fires the first tick to start reading the log right away,
-// rather than waiting 50ms. This ensures early log lines aren't missed.
+// The first tick is delayed 300ms to allow Ansible to start, load modules,
+// and rotate the log file before we attempt to open it. Subsequent ticks
+// fire every 50ms.
 func (e ExecModel) Init() tea.Cmd {
 	return tea.Batch(
-		func() tea.Msg { return execTickMsg(time.Now()) }, // immediate first tick
-		tickCmd(), // then periodic ticks
+		firstTickCmd(), // 300ms delay for first read (after Ansible rotates)
 		waitForProcess(e.proc),
 	)
 }
@@ -582,6 +582,14 @@ func (e *ExecModel) readNewLogLines() []string {
 		}
 	}
 	return lines
+}
+
+// firstTickCmd returns a tea.Cmd that fires after 300ms to allow Ansible
+// to start and rotate the log file before we open it.
+func firstTickCmd() tea.Cmd {
+	return tea.Tick(300*time.Millisecond, func(t time.Time) tea.Msg {
+		return execTickMsg(t)
+	})
 }
 
 // tickCmd returns a tea.Cmd that fires after logPollInterval.
