@@ -18,11 +18,14 @@
 package ansible
 
 import (
+	"bufio"
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"syscall"
 
 	"github.com/valet-sh/cli/internal/platform"
@@ -44,6 +47,13 @@ type ExtraVars struct {
 	// invoked. Ansible playbooks read this via lookup('env','OLDPWD') today;
 	// we pass it explicitly so the Go wrapper doesn't need the OLDPWD trick.
 	WorkDir string `json:"valet_current_path,omitempty"`
+	// BecomePassword, when non-empty, is passed as ansible_become_pass in
+	// extra-vars. This suppresses vars_prompt in playbooks that declare:
+	//   vars_prompt:
+	//     - name: "ansible_become_pass"
+	// Per Ansible source (playbook_executor.py): vars_prompt is skipped when
+	// the variable is already present in extra_vars.
+	BecomePassword string `json:"ansible_become_pass,omitempty"`
 }
 
 // RunOpts configures a single ansible-playbook invocation.
@@ -146,10 +156,11 @@ func Run(opts *RunOpts) error {
 //
 // stdout and stderr are discarded because the Ansible callback plugin writes
 // all output to the log file; the TUI tails that file directly.
-func RunSubprocess(opts *RunOpts) (*exec.Cmd, error) {
+
+func RunSubprocess(opts *RunOpts) (*exec.Cmd, func(), error) {
 	playbookPath := filepath.Join(platform.RepoDir(), "playbooks", opts.Playbook+".yml")
 	if _, err := os.Stat(playbookPath); err != nil {
-		return nil, fmt.Errorf("playbook not found: %s", playbookPath)
+		return nil, nil, fmt.Errorf("playbook not found: %s", playbookPath)
 	}
 
 	workDir := opts.WorkDir
@@ -157,8 +168,121 @@ func RunSubprocess(opts *RunOpts) (*exec.Cmd, error) {
 		var err error
 		workDir, err = os.Getwd()
 		if err != nil {
-			return nil, fmt.Errorf("getting working directory: %w", err)
+			return nil, nil, fmt.Errorf("getting working directory: %w", err)
 		}
+	}
+
+	extraVars := ExtraVars{
+		CLI: CLIVars{
+			Args: opts.Args,
+			Opts: opts.Opts,
+		},
+		WorkDir: workDir,
+	}
+	if extraVars.CLI.Args == nil {
+		extraVars.CLI.Args = []string{}
+	}
+	if extraVars.CLI.Opts == nil {
+		extraVars.CLI.Opts = []string{}
+	}
+
+	// Track temp files for cleanup.
+	var tmpFiles []string
+	cleanup := func() {
+		for _, f := range tmpFiles {
+			os.Remove(f)
+		}
+	}
+
+	// --- Become password handling ---
+	var becomePasswordFile string
+
+	if len(opts.BecomePassword) > 0 {
+		bpf, err := writeSecretFile(opts.BecomePassword)
+		if err != nil {
+			cleanup()
+			return nil, nil, fmt.Errorf("writing become-password-file: %w", err)
+		}
+		becomePasswordFile = bpf
+		tmpFiles = append(tmpFiles, bpf)
+
+		extraVars.BecomePassword = string(opts.BecomePassword)
+
+		for i := range opts.BecomePassword {
+			opts.BecomePassword[i] = 0
+		}
+	}
+
+	extraVarsJSON, err := json.Marshal(extraVars)
+	if err != nil {
+		cleanup()
+		return nil, nil, fmt.Errorf("serializing extra vars: %w", err)
+	}
+
+	ansibleBin := platform.AnsiblePlaybookBin()
+	repoDir := platform.RepoDir()
+
+	args := []string{playbookPath}
+
+	evFile, err := writeSecretFile(extraVarsJSON)
+	if err != nil {
+		cleanup()
+		return nil, nil, fmt.Errorf("writing extra-vars file: %w", err)
+	}
+	tmpFiles = append(tmpFiles, evFile)
+	args = append(args, "-e", "@"+evFile)
+
+	if becomePasswordFile != "" {
+		args = append(args, "--become-password-file", becomePasswordFile)
+	}
+
+	if opts.Verbose {
+		args = append(args, "-v")
+	}
+
+	env := os.Environ()
+	env = setEnv(env, "OLDPWD", workDir)
+
+	cmd := exec.Command(ansibleBin, args...)
+	cmd.Dir = repoDir
+	cmd.Env = env
+
+	devNull, err := os.Open(os.DevNull)
+	if err != nil {
+		cleanup()
+		return nil, nil, fmt.Errorf("opening /dev/null: %w", err)
+	}
+	cmd.Stdin = devNull
+
+	cmd.Stdout = nil
+	cmd.Stderr = nil
+
+	if err = cmd.Start(); err != nil {
+		devNull.Close()
+		cleanup()
+		return nil, nil, fmt.Errorf("starting ansible-playbook: %w", err)
+	}
+
+	devNull.Close()
+
+	return cmd, cleanup, nil
+}
+
+// ListTasks runs ansible-playbook --list-tasks to count how many tasks
+// the playbook will execute. Returns 0 if listing fails so callers can
+// fall back gracefully to a spinner without a total count.
+//
+// This is used by the TUI to render a real progress bar: [=====>    ] 12/47
+// instead of just "12 tasks" with a spinner.
+func ListTasks(opts *RunOpts) int {
+	playbookPath := filepath.Join(platform.RepoDir(), "playbooks", opts.Playbook+".yml")
+	if _, err := os.Stat(playbookPath); err != nil {
+		return 0
+	}
+
+	workDir := opts.WorkDir
+	if workDir == "" {
+		workDir, _ = os.Getwd()
 	}
 
 	extraVars := ExtraVars{
@@ -177,45 +301,102 @@ func RunSubprocess(opts *RunOpts) (*exec.Cmd, error) {
 
 	extraVarsJSON, err := json.Marshal(extraVars)
 	if err != nil {
-		return nil, fmt.Errorf("serializing extra vars: %w", err)
+		return 0
 	}
 
 	ansibleBin := platform.AnsiblePlaybookBin()
 	repoDir := platform.RepoDir()
 
-	args := []string{playbookPath, "-e", string(extraVarsJSON)}
+	args := []string{playbookPath, "--list-tasks", "-e", string(extraVarsJSON)}
 	if opts.Verbose {
 		args = append(args, "-v")
 	}
 
-	env := os.Environ()
-	env = setEnv(env, "OLDPWD", workDir)
-
-	// If a become password was provided, pass it via the env var Ansible reads.
-	// Correct name is ANSIBLE_BECOME_PASS (confirmed: ansible/plugins/become/sudo.py).
-	// The slice is zeroed immediately after use so the password does not linger.
-	// Note: stdin is NOT passed through — Bubble Tea owns stdin during TUI execution.
-	// The password must always be supplied via this env var when running from the TUI.
-	if len(opts.BecomePassword) > 0 {
-		env = setEnv(env, "ANSIBLE_BECOME_PASS", string(opts.BecomePassword))
-		for i := range opts.BecomePassword {
-			opts.BecomePassword[i] = 0
-		}
-	}
-
 	cmd := exec.Command(ansibleBin, args...)
 	cmd.Dir = repoDir
-	cmd.Env = env
-	// Do NOT set cmd.Stdin — Bubble Tea owns stdin during TUI execution.
-	// Discard stdout/stderr — all output goes to the log file via the callback.
-	cmd.Stdout = nil
+	cmd.Env = os.Environ()
+
+	var output bytes.Buffer
+	cmd.Stdout = &output
 	cmd.Stderr = nil
 
-	if err = cmd.Start(); err != nil {
-		return nil, fmt.Errorf("starting ansible-playbook: %w", err)
+	if err = cmd.Run(); err != nil {
+		return 0
 	}
 
-	return cmd, nil
+	return countTaskLines(output.String())
+}
+
+// countTaskLines counts lines in --list-tasks output that represent actual tasks.
+//
+// Ansible --list-tasks output format:
+//
+//	play #1 (localhost): Play name  TAGS: []
+//
+//	  task path: /path/to/file.yml:5
+//	  Task name  TAGS: []
+//
+// We identify task lines by:
+//   - Line starts with whitespace (indented)
+//   - Line contains "TAGS:" (present on all task/play lines)
+//   - Line does NOT contain "play #" (excludes play headers)
+//   - Line does NOT contain "task path:" (excludes path metadata lines)
+//
+// This heuristic may miscount in edge cases, but it is good enough for a
+// progress bar estimate. Returns 0 if the output is malformed.
+func countTaskLines(output string) int {
+	count := 0
+	scanner := bufio.NewScanner(strings.NewReader(output))
+	for scanner.Scan() {
+		line := scanner.Text()
+		trimmed := strings.TrimSpace(line)
+
+		// Must be indented and contain TAGS marker.
+		if len(line) == 0 || line[0] != ' ' || !strings.Contains(trimmed, "TAGS:") {
+			continue
+		}
+
+		// Skip play headers (they contain "play #").
+		if strings.Contains(trimmed, "play #") {
+			continue
+		}
+
+		// Skip "task path:" metadata lines.
+		if strings.HasPrefix(trimmed, "task path:") {
+			continue
+		}
+
+		count++
+	}
+	return count
+}
+
+// writeSecretFile writes data to a temp file with owner-only permissions (0600).
+// The caller is responsible for removing the file when no longer needed.
+func writeSecretFile(data []byte) (string, error) {
+	tmpFile, err := os.CreateTemp("", "valetsh-secret-*")
+	if err != nil {
+		return "", err
+	}
+
+	if err := os.Chmod(tmpFile.Name(), 0600); err != nil {
+		tmpFile.Close()
+		os.Remove(tmpFile.Name())
+		return "", err
+	}
+
+	if _, err := tmpFile.Write(data); err != nil {
+		tmpFile.Close()
+		os.Remove(tmpFile.Name())
+		return "", err
+	}
+
+	if err := tmpFile.Close(); err != nil {
+		os.Remove(tmpFile.Name())
+		return "", err
+	}
+
+	return tmpFile.Name(), nil
 }
 
 // setEnv sets or replaces a key in an environ slice (KEY=VALUE format).
