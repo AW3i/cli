@@ -17,7 +17,6 @@ package tui
 import (
 	"bufio"
 	"fmt"
-	"io"
 	"os"
 	"os/exec"
 	"strings"
@@ -161,16 +160,15 @@ type ExecModel struct {
 // cleanup is a function that deletes temporary files (passwords, extra-vars) after the process exits.
 // totalTasks is the total number of tasks (from --list-tasks), or 0 if unknown.
 // width/height are the dimensions of the panel area.
+//
+// Note: the log file is NOT opened here because the Ansible callback plugin
+// rotates debug.log on startup (logger.handlers[0].doRollover()). If we open
+// the file before the subprocess starts, we end up with a handle to the
+// now-rotated debug.log.1, missing all new output. Instead, we open the file
+// lazily in readNewLogLines() after the rotation has already occurred.
 func NewExecModel(command, version string, withSidebar bool, proc *exec.Cmd, cleanup func(), totalTasks, width, height int) ExecModel {
 	viewport := viewport.New(viewport.WithWidth(width), viewport.WithHeight(execViewportHeight(height, false)))
 	viewport.SetContent("")
-
-	// Open the log file and seek to the current end so we only tail lines
-	// written during this run, not historical content.
-	logFile, _ := os.Open(logPath)
-	if logFile != nil {
-		_, _ = logFile.Seek(0, io.SeekEnd)
-	}
 
 	return ExecModel{
 		command:     command,
@@ -178,7 +176,7 @@ func NewExecModel(command, version string, withSidebar bool, proc *exec.Cmd, cle
 		withSidebar: withSidebar,
 		proc:        proc,
 		cleanup:     cleanup,
-		logFile:     logFile,
+		logFile:     nil, // opened lazily in readNewLogLines()
 		viewport:    viewport,
 		totalTasks:  totalTasks,
 		width:       width,
@@ -522,10 +520,22 @@ func (e *ExecModel) appendLines(lines []string) {
 }
 
 // readNewLogLines reads any lines appended to the log file since the last read.
+// The log file is opened lazily on first call (after Ansible has started and
+// rotated the log). This avoids the issue where opening the file before the
+// subprocess starts leaves us with a handle to the rotated debug.log.1.
 func (e *ExecModel) readNewLogLines() []string {
+	// Lazy-open the log file on first call. By this time, Ansible has started
+	// and the callback plugin's logger.handlers[0].doRollover() has already run,
+	// creating a fresh debug.log. We open from the start (offset 0) to capture
+	// the full run output, including the initial "---" separator lines.
 	if e.logFile == nil {
-		return nil
+		f, err := os.Open(logPath)
+		if err != nil {
+			return nil
+		}
+		e.logFile = f
 	}
+
 	var lines []string
 	scanner := bufio.NewScanner(e.logFile)
 	for scanner.Scan() {
