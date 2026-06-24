@@ -16,13 +16,13 @@
 
 BINARY   := valet
 CMD      := ./cmd/valet
-DIST     := ../dist
-VERSION  := $(shell git -C .. describe --tags --always --dirty 2>/dev/null || echo "dev")
+DIST     := dist
+VERSION  := $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
 LDFLAGS  := -s -w -X main.Version=$(VERSION)
 
 .PHONY: build build-all install clean test lint help
 
-## build: Build for the current OS/arch (output: ../dist/valet)
+## build: Build for the current OS/arch (output: dist/valet)
 build:
 	@mkdir -p $(DIST)
 	CGO_ENABLED=0 go build -trimpath -ldflags "$(LDFLAGS)" -o $(DIST)/$(BINARY) $(CMD)

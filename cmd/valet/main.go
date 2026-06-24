@@ -20,6 +20,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/valet-sh/cli/internal/commands"
+	"github.com/valet-sh/cli/internal/platform"
 	"github.com/valet-sh/cli/internal/tui"
 	"github.com/valet-sh/cli/internal/updater"
 )
@@ -117,25 +118,19 @@ Configuration is driven by a .valet-sh.yml file in each project directory.`,
 	// Print version in the same style as the rest of the tool.
 	cmd.SetVersionTemplate(fmt.Sprintf("valet.sh %s\n", Version))
 
-	// Register all subcommands.
-	cmd.AddCommand(
-		commands.NewInstallCmd(),
-		commands.NewInitCmd(),
-		commands.NewInitInstanceCmd(),
-		commands.NewServiceCmd(),
-		commands.NewLinkCmd(),
-		commands.NewUnlinkCmd(),
-		commands.NewLinksCmd(),
-		commands.NewConfigCmd(),
-		commands.NewDBCmd(),
-		commands.NewExecCmd(),
-		commands.NewRestoreCmd(),
-		commands.NewXdebugCmd(),
-		commands.NewPhpStormCmd(),
-		commands.NewProjectCmd(),
-		commands.NewUpdateDevCACmd(),
-		commands.NewXPSSetupCmd(),
-	)
+	// Auto-discover subcommands from playbooks/*.yml header annotations.
+	// Each playbook with a @command annotation becomes a cobra command.
+	// Playbooks with colon-separated names (e.g. project:env) are grouped
+	// under a parent command automatically.
+	discovered, err := commands.Discover(platform.RepoDir())
+	if err != nil {
+		// Non-fatal: if playbooks dir is missing (e.g. first-time install
+		// before valet-sh is cloned), the binary still starts and shows help.
+		fmt.Fprintf(os.Stderr, "warning: could not load commands from playbooks: %v\n", err)
+	} else {
+		commands.ApplyHooks(discovered)
+		cmd.AddCommand(discovered...)
+	}
 
 	return cmd
 }
