@@ -1,0 +1,156 @@
+##
+#   Copyright 2025 TechDivision GmbH
+#
+#   Licensed under the Apache License, Version 2.0 (the "License");
+#   you may not use this file except in compliance with the License.
+#   You may obtain a copy of the License at
+#
+#       http://www.apache.org/licenses/LICENSE-2.0
+#
+#   Unless required by applicable law or agreed to in writing, software
+#   distributed under the License is distributed on an "AS IS" BASIS,
+#   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+#   See the License for the specific language governing permissions and
+#   limitations under the License.
+##
+
+run:
+  timeout: 5m
+  go: '1.22'
+  issues-exit-code: 1
+  tests: true
+
+output:
+  formats:
+    - format: colored-line-number
+  print-issued-lines: true
+  print-linter-name: true
+
+linters-settings:
+  errcheck:
+    check-type-assertions: true
+    check-blank: true
+  govet:
+    enable:
+      - shadow
+  gocyclo:
+    min-complexity: 15
+  dupl:
+    threshold: 100
+  goconst:
+    min-len: 3
+    min-occurrences: 3
+  misspell:
+    locale: US
+  lll:
+    line-length: 120
+  goimports:
+    local-prefixes: github.com/valet-sh/valet-sh/cli
+  gocritic:
+    enabled-tags:
+      - performance
+      - style
+      - experimental
+    disabled-checks:
+      - wrapperFunc
+      - dupImport
+  funlen:
+    lines: 100
+    statements: 50
+  cyclop:
+    max-complexity: 15
+  nestif:
+    min-complexity: 5
+
+linters:
+  disable-all: true
+  enable:
+    # Critical linters
+    - errcheck
+    - gosec
+    - gocritic
+    - govet
+    - ineffassign
+    - staticcheck
+    - unused
+    # Code quality
+    - bodyclose
+    - dogsled
+    - gosimple
+    - unconvert
+    - unparam
+    - whitespace
+    # Formatting
+    - gofmt
+    # Disabled for now - can enable gradually:
+    # - goimports  # Disabled - requires running goimports tool which isn't available in all environments
+    # - dupl       # duplicate code detection (too strict for now)
+    # - lll        # line length limit (120 chars too strict)
+    # - misspell   # spelling (false positives with UK spelling)
+    # - mnd        # magic numbers (too strict for CLI tools)
+    # - revive     # style checks (many trivial issues)
+    # - stylecheck # package comments (not critical)
+    # - depguard   # import restrictions (misconfigured)
+
+issues:
+  exclude-files:
+    # Exclude files with typecheck issues from typecheck linter
+    - "internal/config/global.go"
+    - "internal/config/project.go"
+  exclude-rules:
+    # Exclude some linters from running on tests files
+    - path: _test\.go
+      linters:
+        - gocyclo
+        - errcheck
+        - dupl
+        - gosec
+        - lll
+        - funlen
+    - path: cmd/valet/main.go
+      text: "os.Exit"
+      linters:
+        - gocritic
+    # Exclude known linter issues
+    - text: "weak cryptographic primitive"
+      linters:
+        - gosec
+    - text: "G107"
+      linters:
+        - gosec
+    # Security: syscall.Exec is intentional and documented
+    - text: "G204"
+      linters:
+        - gosec
+    # tailFile always receives the hardcoded logPath constant — not a user input
+    - text: "G304"
+      path: internal/tui/exec.go
+      linters:
+        - gosec
+    # Intentional blank assignments for best-effort operations
+    - path: internal/commands/help.go
+      linters:
+        - errcheck
+    - path: internal/commands/helpers.go
+      linters:
+        - errcheck
+    - path: internal/updater/check.go
+      linters:
+        - errcheck
+    # Bubble Tea requires value receivers on all model types — the Elm architecture
+    # mandates that Update returns a new model copy, not a mutated pointer.
+    # hugeParam warnings on all TUI models are expected and correct by design.
+    - path: internal/tui/
+      text: "hugeParam"
+      linters:
+        - gocritic
+    # TUI files use intentional blank assignments for best-effort operations.
+    - path: internal/tui/exec.go
+      linters:
+        - errcheck
+    - path: internal/tui/runner.go
+      linters:
+        - errcheck
+  exclude-use-default: false
+  max-issues-per-linter: 0
+  max-same-issues: 0
