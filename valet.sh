@@ -362,16 +362,8 @@ EOM
             ansible_options="-v"
         fi
 
-        # activate application venv if available
-        if [ -f "${APPLICATION_VENV_DIR}/bin/activate" ]; then
-            source "${APPLICATION_VENV_DIR}/bin/activate"
-        fi
-
         # execute ansible-playbook
-        ansible-playbook ${ansible_options} "${ansible_playbook_file}" "${ansible_extra_vars[@]}" || APPLICATION_RETURN_CODE=$?
-
-        # deactivate venv if available
-        deactivate 2>/dev/null || true
+        /usr/local/valet-sh/venv/bin/ansible-playbook ${ansible_options} "${ansible_playbook_file}" "${ansible_extra_vars[@]}" || APPLICATION_RETURN_CODE=$?
     else
         out error "Command '$command' not available"
     fi
