@@ -329,66 +329,88 @@ func makeLines(n int) []string {
 	return lines
 }
 
-func TestParseAnsibleTaskLine(t *testing.T) {
-	// Simulate what the callback plugin writes to stdout per task:
-	// \x1b[2K\r\033[0;32m⠙\033[0;0m taskname\r
+func TestParseJSONEvent(t *testing.T) {
 	tests := []struct {
-		name  string
-		input string
-		want  string
+		name     string
+		line     string
+		wantType string // "task", "output", or "nil"
+		wantVal  string
 	}{
 		{
-			name:  "typical callback output",
-			input: "\x1b[2K\r\033[0;32m⠙\033[0;0m ensure rabbitmq is started\r",
-			want:  "ensure rabbitmq is started",
+			name:     "task start (lockstep strategy)",
+			line:     `{"_event":"v2_playbook_on_task_start","task":{"name":"Gathering Facts","id":"abc"},"_timestamp":"2025-01-01T00:00:00Z"}`,
+			wantType: "task",
+			wantVal:  "Gathering Facts",
 		},
 		{
-			name:  "different spinner frame",
-			input: "\x1b[2K\r\033[0;32m⠸\033[0;0m shared-variables : set 'current_os' var\r",
-			want:  "shared-variables : set 'current_os' var",
+			name:     "task start (free strategy)",
+			line:     `{"_event":"v2_runner_on_start","task":{"name":"Install packages","id":"xyz"},"_timestamp":"2025-01-01T00:00:00Z"}`,
+			wantType: "task",
+			wantVal:  "Install packages",
 		},
 		{
-			name:  "multiple segments — last wins",
-			input: "\x1b[2K\r\033[0;32m⠋\033[0;0m first task\r\x1b[2K\r\033[0;32m⠙\033[0;0m second task\r",
-			want:  "second task",
+			name:     "runner ok with vsh_stdout",
+			line:     `{"_event":"v2_runner_on_ok","task":{"name":"list services"},"hosts":{"localhost":{"changed":true,"vsh_stdout":"service  status\nphp83    running"}},"_timestamp":"2025-01-01T00:00:00Z"}`,
+			wantType: "output",
+			wantVal:  "service  status\nphp83    running",
 		},
 		{
-			name:  "empty input",
-			input: "",
-			want:  "",
+			name:     "runner ok without vsh_stdout",
+			line:     `{"_event":"v2_runner_on_ok","task":{"name":"install package"},"hosts":{"localhost":{"changed":false}},"_timestamp":"2025-01-01T00:00:00Z"}`,
+			wantType: "nil",
 		},
 		{
-			// The callback writes \x1b[2K\r BEFORE the spinner+taskname line.
-			// A Read() call that returns only the FLUSH prefix must not extract
-			// any task name (previously this caused readTaskCmd to stop early).
-			name:  "flush-only line returns empty",
-			input: "\x1b[2K\r",
-			want:  "",
+			name:     "play start is ignored",
+			line:     `{"_event":"v2_playbook_on_play_start","play":{"name":"service","id":"123"},"_timestamp":"2025-01-01T00:00:00Z"}`,
+			wantType: "nil",
 		},
 		{
-			// The callback writes a play-start line with \n (not \r):
-			//   print(BLUE + "▶ " + BOLD + name + RESET + CURSOR_HIDE, end="\n")
-			// This must not be mistaken for a task name (previously the
-			// play-start marker ▶ was stripped as if it were a spinner, yielding
-			// the play name instead of a task name).
-			name:  "play-start line returns empty",
-			input: "\x1b[1;34m▶ \x1b[;1mvalet.sh\x1b[0;0m\x1b[?25l\n",
-			want:  "",
+			name:     "stats event is ignored",
+			line:     `{"_event":"v2_playbook_on_stats","stats":{"localhost":{"ok":5,"failures":0}},"_timestamp":"2025-01-01T00:00:00Z"}`,
+			wantType: "nil",
 		},
 		{
-			// A Read() that captures the play-start line + FLUSH + a real task
-			// must still return the task name (not the play name).
-			name:  "play-start mixed with task line — task name wins",
-			input: "\x1b[1;34m▶ \x1b[;1mvalet.sh\x1b[0;0m\x1b[?25l\n\x1b[2K\r\x1b[0;32m⠙\x1b[0;0m Gathering Facts\r",
-			want:  "Gathering Facts",
+			name:     "empty line",
+			line:     "",
+			wantType: "nil",
+		},
+		{
+			name:     "non-JSON line",
+			line:     "not json at all",
+			wantType: "nil",
+		},
+		{
+			name:     "task name is shortened",
+			line:     `{"_event":"v2_playbook_on_task_start","task":{"name":"some-role : gather info | check conditions"},"_timestamp":"2025-01-01T00:00:00Z"}`,
+			wantType: "task",
+			wantVal:  "check conditions",
 		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			got := parseAnsibleTaskLine([]byte(tc.input))
-			if got != tc.want {
-				t.Errorf("parseAnsibleTaskLine(%q) = %q, want %q", tc.input, got, tc.want)
+			msg := parseJSONEvent([]byte(tc.line))
+			switch tc.wantType {
+			case "task":
+				tm, ok := msg.(ansibleTaskMsg)
+				if !ok {
+					t.Fatalf("expected ansibleTaskMsg, got %T", msg)
+				}
+				if string(tm) != tc.wantVal {
+					t.Errorf("task name: got %q, want %q", string(tm), tc.wantVal)
+				}
+			case "output":
+				om, ok := msg.(ansibleOutputMsg)
+				if !ok {
+					t.Fatalf("expected ansibleOutputMsg, got %T", msg)
+				}
+				if string(om) != tc.wantVal {
+					t.Errorf("output: got %q, want %q", string(om), tc.wantVal)
+				}
+			case "nil":
+				if msg != nil {
+					t.Errorf("expected nil, got %T: %v", msg, msg)
+				}
 			}
 		})
 	}
@@ -454,31 +476,47 @@ func TestParseLogTaskName(t *testing.T) {
 	}
 }
 
-func TestReadTaskCmdSkipsFlushLines(t *testing.T) {
-	// Simulate a pipe that sends: FLUSH-only data, then a real task line.
-	// readTaskCmd must skip the FLUSH and return the task name, not stop early.
-	flush := "\x1b[2K\r"
-	taskLine := "\x1b[2K\r\x1b[0;32m⠙\x1b[0;0m my : task name\r"
+func TestReadTaskCmdParsesJSONTaskStart(t *testing.T) {
+	// Simulate a pipe that sends: a play_start event (ignored) then a task_start.
+	playSt := `{"_event":"v2_playbook_on_play_start","play":{"name":"service"},"_timestamp":"t"}` + "\n"
+	taskSt := `{"_event":"v2_playbook_on_task_start","task":{"name":"Gathering Facts"},"_timestamp":"t"}` + "\n"
 
 	pr, pw := io.Pipe()
-
-	// Writer goroutine: send FLUSH then task line.
 	go func() {
-		pw.Write([]byte(flush))
-		// small delay to ensure two separate Read() calls are possible
-		pw.Write([]byte(taskLine))
+		pw.Write([]byte(playSt))
+		pw.Write([]byte(taskSt))
 		pw.Close()
 	}()
 
-	cmd := readTaskCmd(pr)
-	msg := cmd()
+	msg := readTaskCmd(pr)()
 
-	taskMsg, ok := msg.(ansibleTaskMsg)
+	tm, ok := msg.(ansibleTaskMsg)
 	if !ok {
 		t.Fatalf("expected ansibleTaskMsg, got %T", msg)
 	}
-	if string(taskMsg) != "my : task name" {
-		t.Errorf("expected %q, got %q", "my : task name", string(taskMsg))
+	if string(tm) != "Gathering Facts" {
+		t.Errorf("expected %q, got %q", "Gathering Facts", string(tm))
+	}
+}
+
+func TestReadTaskCmdReturnsOutputMsg(t *testing.T) {
+	// Simulate a pipe that sends a runner_on_ok with vsh_stdout.
+	line := `{"_event":"v2_runner_on_ok","task":{"name":"list services"},"hosts":{"localhost":{"vsh_stdout":"table content"}},"_timestamp":"t"}` + "\n"
+
+	pr, pw := io.Pipe()
+	go func() {
+		pw.Write([]byte(line))
+		pw.Close()
+	}()
+
+	msg := readTaskCmd(pr)()
+
+	om, ok := msg.(ansibleOutputMsg)
+	if !ok {
+		t.Fatalf("expected ansibleOutputMsg, got %T", msg)
+	}
+	if string(om) != "table content" {
+		t.Errorf("expected %q, got %q", "table content", string(om))
 	}
 }
 
@@ -628,242 +666,66 @@ func TestAppendLinesSkipsMetaTasks(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// waitForFirstTask
+// waitForFirstJSONTask
 // ---------------------------------------------------------------------------
 
-// TestWaitForFirstTask_SpinnerAfterPreamble verifies that waitForFirstTask
-// blocks on CURSOR_SHOW and play-start output and only unblocks on the first
-// Braille spinner character, preserving all bytes for the exec model.
-func TestWaitForFirstTask_SpinnerAfterPreamble(t *testing.T) {
-	// Mimic exact callback plugin output order:
-	//   1. CURSOR_SHOW escape (\033[?25h)
-	//   2. play-start line with ▶ (U+25B6 = \xe2\x96\xb6)
-	//   3. FLUSH + spinner task line (spinner ⠙ = U+2819 = \xe2\xa0\x99)
-	cursorShow := "\033[?25h"
-	playStart := "\033[1;34m\xe2\x96\xb6\033[0;0m play-name\033[?25l\n"
-	taskLine := "\033[2K\r\033[0;32m\xe2\xa0\x99\033[0;0m Gathering Facts\r"
-	input := cursorShow + playStart + taskLine + " more data"
+func TestWaitForFirstJSONTask_BlocksOnPlayStart(t *testing.T) {
+	// jsonl emits play_start before vars_prompt; task_start fires after.
+	// waitForFirstJSONTask must pass through play_start and only unblock
+	// on the first task-start event, preserving all bytes.
+	playSt := `{"_event":"v2_playbook_on_play_start","play":{"name":"service"},"_timestamp":"t"}` + "\n"
+	taskSt := `{"_event":"v2_playbook_on_task_start","task":{"name":"Gathering Facts"},"_timestamp":"t"}` + "\n"
+	extra := `{"_event":"v2_runner_on_ok","task":{"name":"list"},"_timestamp":"t"}` + "\n"
+	input := playSt + taskSt + extra
 
-	r := strings.NewReader(input)
-	result := waitForFirstTask(r)
-
+	result := waitForFirstJSONTask(strings.NewReader(input))
 	got, err := io.ReadAll(result)
 	if err != nil {
-		t.Fatalf("ReadAll error: %v", err)
-	}
-
-	if string(got) != input {
-		t.Errorf("expected full input preserved\ngot:  %q\nwant: %q", string(got), input)
-	}
-}
-
-// TestWaitForFirstTask_PlayStartNotTrigger verifies that the play-start ▶
-// character (U+25B6, \xe2\x96\xb6) does NOT trigger the gate — only the
-// Braille spinner prefix \xe2\xa0 does.
-func TestWaitForFirstTask_PlayStartNotTrigger(t *testing.T) {
-	// ▶ is \xe2\x96\xb6; spinner ⠙ is \xe2\xa0\x99
-	input := "\xe2\x96\xb6 play-name\n\xe2\xa0\x99 first task\r"
-	r := strings.NewReader(input)
-	result := waitForFirstTask(r)
-
-	got, err := io.ReadAll(result)
-	if err != nil {
-		t.Fatalf("ReadAll error: %v", err)
+		t.Fatalf("ReadAll: %v", err)
 	}
 	if string(got) != input {
 		t.Errorf("all bytes should be preserved\ngot:  %q\nwant: %q", string(got), input)
 	}
 }
 
-// TestWaitForFirstTask_EarlyEOF verifies that if the pipe closes before any
-// spinner character (e.g. Ansible crashes at startup), waitForFirstTask
-// returns whatever bytes were buffered without blocking forever.
-func TestWaitForFirstTask_EarlyEOF(t *testing.T) {
-	// Only CURSOR_SHOW and a play-start line, then EOF — no task ever starts.
-	input := "\033[?25h\xe2\x96\xb6 play\n"
-	r := strings.NewReader(input)
-	result := waitForFirstTask(r)
-
+func TestWaitForFirstJSONTask_EarlyEOF(t *testing.T) {
+	// Only a play_start, then EOF — no task ever starts. Must return without blocking.
+	input := `{"_event":"v2_playbook_on_play_start","play":{"name":"service"},"_timestamp":"t"}` + "\n"
+	result := waitForFirstJSONTask(strings.NewReader(input))
 	got, err := io.ReadAll(result)
 	if err != nil {
-		t.Fatalf("ReadAll error: %v", err)
+		t.Fatalf("ReadAll: %v", err)
 	}
 	if string(got) != input {
 		t.Errorf("early EOF: bytes should be preserved\ngot:  %q\nwant: %q", string(got), input)
 	}
 }
 
-// TestWaitForFirstTask_EmptyInput verifies graceful handling of an immediately
-// closed pipe (e.g. Ansible fails before writing anything).
-func TestWaitForFirstTask_EmptyInput(t *testing.T) {
-	r := strings.NewReader("")
-	result := waitForFirstTask(r)
-
-	got, err := io.ReadAll(result)
-	if err != nil {
-		t.Fatalf("ReadAll error: %v", err)
-	}
+func TestWaitForFirstJSONTask_EmptyInput(t *testing.T) {
+	result := waitForFirstJSONTask(strings.NewReader(""))
+	got, _ := io.ReadAll(result)
 	if len(got) != 0 {
 		t.Errorf("expected empty output, got %q", string(got))
 	}
 }
 
-// ---------------------------------------------------------------------------
-// captureReader
-// ---------------------------------------------------------------------------
-
-// buildCallbackOutput builds a realistic stdout stream matching the exact
-// byte sequence the valet-sh callback plugin produces during a playbook run.
-func buildCallbackOutput(vshStdout string) string {
-	const (
-		FLUSH       = "\x1b[2K"
-		CURSOR_SHOW = "\x1b[?25h"
-		CURSOR_HIDE = "\x1b[?25l"
-		GREEN       = "\x1b[0;32m"
-		BLUE        = "\x1b[1;34m"
-		BOLD        = "\x1b[;1m"
-		RESET       = "\x1b[0;0m"
-		SPINNER     = "\xe2\xa0\x99" // ⠙ U+2819
-	)
-
-	// Matches the exact order the callback plugin writes:
-	// 1. CURSOR_SHOW at module import
-	// 2. play-start line (\n-terminated)
-	// 3. FLUSH+CR before spinner, spinner line (both \r-terminated)
-	// 4. FLUSH+newline before vsh_stdout, then vsh_stdout content
-	// 5. FLUSH+newline before stats, then success line
-	return CURSOR_SHOW +
-		BLUE + "▶ " + BOLD + "valet-service" + RESET + CURSOR_HIDE + "\n" +
-		FLUSH + "\r" +
-		GREEN + SPINNER + RESET + " Gathering Facts\r" +
-		FLUSH + "\r" +
-		GREEN + SPINNER + RESET + " list services\r" +
-		FLUSH + "\n" +
-		vshStdout + CURSOR_SHOW + "\n" +
-		FLUSH + "\n" +
-		GREEN + "✔ done" + RESET + CURSOR_SHOW + "\n"
-}
-
-func TestCaptureReader_CapturesVshStdout(t *testing.T) {
-	tableContent := "service     status\nphp83       running\nmariadb114  running"
-	input := buildCallbackOutput(tableContent)
-
-	cr := newCaptureReader(strings.NewReader(input))
-
-	// Drain everything (simulates readTaskCmd consuming the pipe).
-	_, err := io.ReadAll(cr)
-	if err != nil {
-		t.Fatalf("ReadAll: %v", err)
+func TestIsJSONTaskStart(t *testing.T) {
+	tests := []struct {
+		line string
+		want bool
+	}{
+		{`{"_event":"v2_playbook_on_task_start","task":{"name":"Gathering Facts"},"_timestamp":"t"}`, true},
+		{`{"_event":"v2_runner_on_start","task":{"name":"install pkg"},"_timestamp":"t"}`, true},
+		{`{"_event":"v2_playbook_on_play_start","play":{"name":"service"},"_timestamp":"t"}`, false},
+		{`{"_event":"v2_runner_on_ok","task":{"name":"ok"},"_timestamp":"t"}`, false},
+		{`{"_event":"v2_playbook_on_stats","stats":{},"_timestamp":"t"}`, false},
+		{`not json`, false},
+		{``, false},
 	}
-
-	output := cr.Output()
-	if len(output) == 0 {
-		t.Fatal("expected captured output, got nothing")
-	}
-
-	// The table content should be in the captured output.
-	if !strings.Contains(string(output), "php83") {
-		t.Errorf("captured output missing table content\ngot: %q", string(output))
-	}
-}
-
-func TestCaptureReader_DiscardSpinnerLines(t *testing.T) {
-	// \r-terminated lines (spinners) must not be captured.
-	input := "\x1b[2K\r\x1b[0;32m\xe2\xa0\x99\x1b[0;0m Gathering Facts\r"
-	cr := newCaptureReader(strings.NewReader(input))
-	_, _ = io.ReadAll(cr)
-
-	if len(cr.Output()) > 0 {
-		t.Errorf("spinner line should not be captured, got: %q", string(cr.Output()))
-	}
-}
-
-func TestCaptureReader_DiscardPlayStart(t *testing.T) {
-	// play-start line (\n-terminated, starts with ▶) must not be captured.
-	input := "\x1b[1;34m▶ \x1b[;1mplay name\x1b[0;0m\x1b[?25l\n"
-	cr := newCaptureReader(strings.NewReader(input))
-	_, _ = io.ReadAll(cr)
-
-	if len(cr.Output()) > 0 {
-		t.Errorf("play-start line should not be captured, got: %q", string(cr.Output()))
-	}
-}
-
-func TestCaptureReader_DiscardStatsSuccess(t *testing.T) {
-	// stats success line (starts with ✔) must not be captured.
-	input := "\x1b[2K\n\x1b[0;32m✔ done\x1b[0;0m\x1b[?25h\n"
-	cr := newCaptureReader(strings.NewReader(input))
-	_, _ = io.ReadAll(cr)
-
-	if len(cr.Output()) > 0 {
-		t.Errorf("stats success line should not be captured, got: %q", string(cr.Output()))
-	}
-}
-
-func TestCaptureReader_DiscardStatsFailure(t *testing.T) {
-	// stats failure line (starts with ✘) must not be captured.
-	input := "\x1b[2K\n\x1b[1;31m✘ something failed\x1b[0;0m\n"
-	cr := newCaptureReader(strings.NewReader(input))
-	_, _ = io.ReadAll(cr)
-
-	if len(cr.Output()) > 0 {
-		t.Errorf("stats failure line should not be captured, got: %q", string(cr.Output()))
-	}
-}
-
-func TestCaptureReader_PassesThroughAllBytes(t *testing.T) {
-	// captureReader must pass ALL bytes through to the caller unchanged.
-	tableContent := "service  status\nphp83    running"
-	input := buildCallbackOutput(tableContent)
-
-	cr := newCaptureReader(strings.NewReader(input))
-	got, err := io.ReadAll(cr)
-	if err != nil {
-		t.Fatalf("ReadAll: %v", err)
-	}
-
-	if string(got) != input {
-		t.Errorf("bytes not passed through unchanged\ngot:  %q\nwant: %q", string(got), input)
-	}
-}
-
-func TestCaptureReader_EmptyInput(t *testing.T) {
-	cr := newCaptureReader(strings.NewReader(""))
-	_, _ = io.ReadAll(cr)
-
-	if len(cr.Output()) != 0 {
-		t.Errorf("empty input should produce empty output, got: %q", string(cr.Output()))
-	}
-}
-
-// ---------------------------------------------------------------------------
-// cleanControlCodes
-// ---------------------------------------------------------------------------
-
-func TestCleanControlCodes_RemovesFlushCursorCodes(t *testing.T) {
-	input := []byte("\x1b[2Ksome table content\x1b[?25h\nrow two\x1b[?25l\n")
-	got := cleanControlCodes(input)
-
-	if strings.Contains(got, "\x1b[2K") {
-		t.Error("FLUSH code should be removed")
-	}
-	if strings.Contains(got, "\x1b[?25h") {
-		t.Error("CURSOR_SHOW should be removed")
-	}
-	if strings.Contains(got, "\x1b[?25l") {
-		t.Error("CURSOR_HIDE should be removed")
-	}
-	if !strings.Contains(got, "some table content") {
-		t.Error("content should be preserved")
-	}
-}
-
-func TestCleanControlCodes_PreservesColorCodes(t *testing.T) {
-	// SGR color codes (\x1b[...m) must be preserved — they render colors.
-	input := []byte("\x1b[0;32mrunning\x1b[0;0m")
-	got := cleanControlCodes(input)
-
-	if !strings.Contains(got, "\x1b[0;32m") {
-		t.Error("SGR color codes should be preserved, not stripped")
+	for _, tc := range tests {
+		got := isJSONTaskStart([]byte(tc.line))
+		if got != tc.want {
+			t.Errorf("isJSONTaskStart(%q) = %v, want %v", tc.line, got, tc.want)
+		}
 	}
 }
