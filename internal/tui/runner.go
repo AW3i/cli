@@ -22,7 +22,7 @@ import (
 	"os"
 	"os/exec"
 	"strings"
-	"time"
+	"syscall"
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/x/term"
@@ -192,27 +192,27 @@ func runExecPanel(command, version string, proc *exec.Cmd, ansibleOut io.Reader,
 // sit in the terminal's input buffer after BubbleTea exits; without draining
 // them they appear as visual noise echoed by the shell.
 //
-// Uses a 50ms read deadline so we don't block if no bytes are pending.
+// Uses O_NONBLOCK on the stdin file descriptor so the read returns immediately
+// with EAGAIN when no bytes are pending. This is POSIX-compliant and works on
+// both Linux and macOS (where TTY SetReadDeadline is unreliable).
 func drainStdin() {
-	// Set a short read deadline via a separate goroutine approach:
-	// try to read with a 50ms timeout.
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		buf := make([]byte, 256)
-		for {
-			os.Stdin.SetReadDeadline(time.Now().Add(50 * time.Millisecond)) //nolint:errcheck
-			n, err := os.Stdin.Read(buf)
-			if n == 0 || err != nil {
-				break
-			}
+	fd := int(os.Stdin.Fd())
+
+	// Switch stdin to non-blocking mode. If this fails (e.g. stdin is not a
+	// real fd, or the OS denies it), bail out silently.
+	if err := syscall.SetNonblock(fd, true); err != nil {
+		return
+	}
+	// Restore blocking mode when done, regardless of what we read.
+	defer syscall.SetNonblock(fd, false) //nolint:errcheck
+
+	buf := make([]byte, 256)
+	for {
+		n, err := os.Stdin.Read(buf)
+		if n == 0 || err != nil {
+			// EAGAIN (no more bytes available) or any other error: done.
+			break
 		}
-		// Clear deadline so subsequent reads block normally.
-		os.Stdin.SetReadDeadline(time.Time{}) //nolint:errcheck
-	}()
-	select {
-	case <-done:
-	case <-time.After(150 * time.Millisecond):
 	}
 }
 
