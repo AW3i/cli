@@ -21,6 +21,7 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"unicode/utf8"
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/x/term"
@@ -72,8 +73,22 @@ func RunWithPanel(root *cobra.Command, args []string, version string) error {
 	// the reader so the exec panel receives the complete stdout stream.
 	taskOut := waitForFirstTask(ansibleOut)
 
+	// Wrap the stdout reader with a captureReader that intercepts \n-terminated
+	// segments (vsh_stdout table output, db listings, etc.) while passing all
+	// bytes through unchanged to the exec panel's task-name parser.
+	// The captured content is printed to the terminal after the exec panel exits.
+	cr := newCaptureReader(taskOut)
+
 	commandStr := strings.Join(args, " ")
-	return runExecPanel(commandStr, version, proc, taskOut, cleanup, 0)
+	err = runExecPanel(commandStr, version, proc, cr, cleanup, 0)
+
+	// Print any captured vsh_stdout output (service tables, db listings, etc.)
+	// now that BubbleTea has exited and the terminal is fully restored.
+	if output := cr.Output(); len(output) > 0 {
+		fmt.Fprint(os.Stdout, cleanControlCodes(output))
+	}
+
+	return err
 }
 
 // waitForFirstTask reads from the ansible stdout pipe byte-by-byte, buffering
@@ -126,6 +141,135 @@ func waitForFirstTask(r io.Reader) io.Reader {
 	}
 
 	return io.MultiReader(&buf, r)
+}
+
+// captureReader wraps an io.Reader and intercepts the Ansible callback
+// plugin's stdout stream to capture vsh_stdout content (service tables,
+// db listings, etc.) while passing all bytes through unchanged to the
+// exec panel's task-name parser.
+//
+// The callback plugin writes two categories of content to stdout:
+//
+//   - \r-terminated: spinner updates and FLUSH prefixes — task progress only.
+//     These are consumed by readTaskCmd() for task-name display and discarded.
+//
+//   - \n-terminated: actual output (vsh_stdout), play-start decorators, and
+//     stats (✔ done / ✘ failed). Only the actual output is captured; the
+//     decorators and stats are filtered out because the exec panel handles
+//     those itself.
+//
+// Filtering rule (applied after stripping ANSI escape codes):
+//
+//   - empty segment → discard
+//   - starts with '▶' (play-start) → discard
+//   - starts with '✔' (stats success) → discard
+//   - starts with '✘' or 'ℹ' (stats failure / info) → discard
+//   - starts with a Braille char (U+2800..U+28FF, spinner) → discard
+//   - anything else → CAPTURE (vsh_stdout table content)
+//
+// All bytes are passed through Read() unchanged so readTaskCmd() continues
+// to work normally. The captured content is retrieved after the exec panel
+// exits via Output().
+type captureReader struct {
+	r       io.Reader
+	pending []byte // accumulates the current incomplete line
+	output  []byte // captured vsh_stdout segments (raw, with ANSI colors)
+}
+
+func newCaptureReader(r io.Reader) *captureReader {
+	return &captureReader{r: r}
+}
+
+// Read passes bytes through to the caller and processes them for capture.
+func (cr *captureReader) Read(p []byte) (int, error) {
+	n, err := cr.r.Read(p)
+	if n > 0 {
+		cr.process(p[:n])
+	}
+	return n, err
+}
+
+// process classifies each byte and accumulates complete \n-terminated segments
+// for capture evaluation.
+func (cr *captureReader) process(b []byte) {
+	for _, c := range b {
+		switch c {
+		case '\r':
+			// Spinner / FLUSH overwrite line — discard accumulated pending bytes.
+			cr.pending = cr.pending[:0]
+		case '\n':
+			// Complete \n-terminated segment — evaluate for capture.
+			if cr.shouldCapture(cr.pending) {
+				cr.output = append(cr.output, cr.pending...)
+				cr.output = append(cr.output, '\n')
+			}
+			cr.pending = cr.pending[:0]
+		default:
+			cr.pending = append(cr.pending, c)
+		}
+	}
+}
+
+// shouldCapture returns true when a raw (ANSI-colored) line segment contains
+// actual vsh_stdout content that the user should see printed after the exec panel.
+func (cr *captureReader) shouldCapture(raw []byte) bool {
+	if len(raw) == 0 {
+		return false
+	}
+
+	// Strip ANSI escape sequences to classify the content.
+	stripped := strings.TrimSpace(ansiEscape.ReplaceAllString(string(raw), ""))
+	if stripped == "" {
+		return false
+	}
+
+	// Decode the first rune for classification.
+	first, _ := utf8.DecodeRuneInString(stripped)
+	if first == utf8.RuneError {
+		return false
+	}
+
+	switch {
+	case first == '▶':
+		// play-start line ("▶ play-name") — decorative, discard.
+		return false
+	case first == '✔':
+		// stats success ("✔ done") — exec panel handles this, discard.
+		return false
+	case first == '✘' || first == 'ℹ':
+		// stats failure / info — exec panel handles errors, discard.
+		return false
+	case first >= 0x2800 && first <= 0x28FF:
+		// Braille spinner character — task name line, discard.
+		return false
+	}
+
+	// Everything else is vsh_stdout content (tables, listings, etc.).
+	return true
+}
+
+// Output returns all captured vsh_stdout content accumulated so far.
+// Safe to call after the exec panel exits (all stdout has been consumed).
+func (cr *captureReader) Output() []byte {
+	return cr.output
+}
+
+// cleanControlCodes removes terminal-control ANSI sequences that are harmless
+// during playbook execution but would corrupt the terminal display when printed
+// after the exec panel has already exited and restored the terminal:
+//
+//   - \x1b[2K  — FLUSH (erase current line): would clear the exec panel's last line
+//   - \x1b[?25h — CURSOR_SHOW: cursor is already visible, no-op but noisy
+//   - \x1b[?25l — CURSOR_HIDE: would hide the cursor unexpectedly
+//
+// SGR color codes (\x1b[...m) are preserved so tables render with their
+// original colors in the user's terminal.
+func cleanControlCodes(b []byte) string {
+	s := string(b)
+	s = strings.ReplaceAll(s, "\x1b[2K", "")
+	s = strings.ReplaceAll(s, "\x1b[?25h", "")
+	s = strings.ReplaceAll(s, "\x1b[?25l", "")
+	return s
 }
 
 // runExecPanel starts a standalone Bubble Tea program showing the execution
