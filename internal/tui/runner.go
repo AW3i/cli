@@ -22,6 +22,7 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"time"
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/x/term"
@@ -139,8 +140,11 @@ func isJSONTaskStart(line []byte) bool {
 
 // runExecPanel starts a standalone Bubble Tea program showing the execution
 // panel for the given proc. Called for direct CLI invocations (no sidebar).
-// After the panel exits, any vsh_stdout output captured during the run
-// (service tables, db listings, etc.) is printed to the terminal.
+//
+// vsh_stdout content (service tables, db listings, etc.) is written by
+// readTaskCmd directly to a shared *bytes.Buffer, bypassing the BubbleTea
+// message queue so that tea.Quit cannot race ahead of ansibleOutputMsg
+// delivery. The buffer is printed after p.Run() returns.
 func runExecPanel(command, version string, proc *exec.Cmd, ansibleOut io.Reader, cleanup func(), totalTasks int) error {
 	// Get terminal size with fallback to 80x24.
 	width, height := 80, 24
@@ -148,25 +152,68 @@ func runExecPanel(command, version string, proc *exec.Cmd, ansibleOut io.Reader,
 		width, height = w, h
 	}
 
+	// Shared buffer: readTaskCmd goroutine writes vsh_stdout content here
+	// directly, outside the BubbleTea message queue.
+	var outputBuf bytes.Buffer
+
 	m := standaloneExecModel{
-		execPanel: NewExecModel(command, version, false, proc, ansibleOut, cleanup, totalTasks, width, height),
+		execPanel: NewExecModel(command, version, false, proc, ansibleOut, &outputBuf, cleanup, totalTasks, width, height),
 	}
 
 	p := tea.NewProgram(m)
 	final, err := p.Run()
+
+	// Drain any pending terminal capability-query responses that BubbleTea
+	// left in stdin (e.g. DECRPM responses \x1b[?2026;2$y). Without this they
+	// appear as visual noise in the shell after the program exits.
+	drainStdin()
+
 	if err != nil {
 		return err
 	}
 
+	// Print any vsh_stdout output now that BubbleTea has exited and the
+	// terminal is fully restored. A blank separator line is added before
+	// the output so it is visually distinct from the exec panel's last line.
+	if outputBuf.Len() > 0 {
+		fmt.Println()
+		fmt.Println(outputBuf.String())
+	}
+
 	if fm, ok := final.(standaloneExecModel); ok {
-		// Print any vsh_stdout content (tables, listings) now that BubbleTea
-		// has exited and the terminal is fully restored.
-		if output := fm.execPanel.CapturedOutput(); output != "" {
-			fmt.Println(output)
-		}
 		return fm.execPanel.Err()
 	}
 	return nil
+}
+
+// drainStdin reads and discards any bytes that the terminal placed in stdin
+// as responses to BubbleTea's capability queries (e.g. Synchronized Output
+// DECRPM \x1b[?2026;2$y, Unicode Mode \x1b[?2027;0$y). These responses
+// sit in the terminal's input buffer after BubbleTea exits; without draining
+// them they appear as visual noise echoed by the shell.
+//
+// Uses a 50ms read deadline so we don't block if no bytes are pending.
+func drainStdin() {
+	// Set a short read deadline via a separate goroutine approach:
+	// try to read with a 50ms timeout.
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		buf := make([]byte, 256)
+		for {
+			os.Stdin.SetReadDeadline(time.Now().Add(50 * time.Millisecond)) //nolint:errcheck
+			n, err := os.Stdin.Read(buf)
+			if n == 0 || err != nil {
+				break
+			}
+		}
+		// Clear deadline so subsequent reads block normally.
+		os.Stdin.SetReadDeadline(time.Time{}) //nolint:errcheck
+	}()
+	select {
+	case <-done:
+	case <-time.After(150 * time.Millisecond):
+	}
 }
 
 // standaloneExecModel wraps ExecModel as a full standalone Bubble Tea program.
