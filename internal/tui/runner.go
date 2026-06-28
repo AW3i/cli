@@ -34,12 +34,12 @@ import (
 // It resolves the ansible RunOpts from the cobra command tree using the
 // provided args slice (e.g. ["service", "start", "php83"]).
 //
-// Ansible's own vars_prompt handles any become-password prompt natively:
+// Ansible's own vars_prompt handles the become-password prompt natively:
 // stdin is connected to the subprocess so the user types directly into
-// Ansible's prompt. BubbleTea only takes over the terminal after the first
-// byte appears on Ansible's stdout — the callback plugin emits its first
-// spinner line only after vars_prompt has completed and tasks have begun.
-// This guarantees stdin is free before BubbleTea needs it for key events.
+// Ansible's prompt on the raw terminal. BubbleTea only takes over after
+// waitForFirstTask() detects the first Braille spinner character from the
+// callback plugin, which is only emitted once tasks start — guaranteeing
+// that vars_prompt has completed and stdin is free.
 //
 // When stdout is not a TTY (CI, pipes), it falls back to the normal
 // cobra/ansible path so non-interactive usage is never affected.
@@ -64,29 +64,68 @@ func RunWithPanel(root *cobra.Command, args []string, version string) error {
 		return fmt.Errorf("starting ansible-playbook: %w", err)
 	}
 
-	// Gate BubbleTea startup on the first byte from Ansible's stdout.
+	// Gate BubbleTea startup on the first Braille spinner character in
+	// Ansible's stdout. This ensures vars_prompt (the sudo password prompt)
+	// has completed before BubbleTea takes over the terminal and stdin.
 	//
-	// The callback plugin writes its first spinner line ("⠙ taskname\r") only
-	// after Ansible has finished processing vars_prompt — so blocking here
-	// ensures the password prompt is fully complete before BubbleTea takes
-	// over the terminal and stdin.
-	//
-	// If Ansible exits before writing anything (e.g. playbook syntax error),
-	// the pipe closes and Read returns io.EOF; we fall through and start the
-	// exec panel which will immediately receive the exit error.
-	firstByte := make([]byte, 1)
-	n, _ := ansibleOut.Read(firstByte)
-
-	// Reconstruct a reader that includes the byte we already consumed.
-	var taskOut io.Reader
-	if n > 0 {
-		taskOut = io.MultiReader(bytes.NewReader(firstByte[:n]), ansibleOut)
-	} else {
-		taskOut = ansibleOut
-	}
+	// All bytes consumed while waiting are buffered and prepended back onto
+	// the reader so the exec panel receives the complete stdout stream.
+	taskOut := waitForFirstTask(ansibleOut)
 
 	commandStr := strings.Join(args, " ")
 	return runExecPanel(commandStr, version, proc, taskOut, cleanup, 0)
+}
+
+// waitForFirstTask reads from the ansible stdout pipe byte-by-byte, buffering
+// everything, until it detects the two-byte UTF-8 prefix of a Braille spinner
+// character (\xe2\xa0). It then returns an io.Reader that replays all consumed
+// bytes followed by the rest of the original reader.
+//
+// The valet-sh callback plugin writes to stdout in this order:
+//
+//  1. \033[?25h (CURSOR_SHOW) — at module import, first byte 0x1B
+//  2. "▶ play-name\n" — at play start (before vars_prompt); '▶' is \xe2\x96\xb6
+//  3. vars_prompt fires here — Ansible reads the password from os.Stdin
+//  4. "\x1b[2K\r\033[0;32m⠙\033[0;0m taskname\r" — at each task start
+//
+// All Braille spinner characters (U+2800..U+28FF) encode as \xe2\xa0\x?? in
+// UTF-8. The play-start '▶' (U+25B6) encodes as \xe2\x96\xb6. Checking the
+// two-byte prefix \xe2\xa0 uniquely identifies a spinner character without
+// false-matching the play-start line or any ANSI escape sequence.
+//
+// If the pipe closes before any task starts (e.g. playbook syntax error or
+// early exit), the buffered bytes are returned as-is so the exec panel can
+// still show the error state.
+func waitForFirstTask(r io.Reader) io.Reader {
+	var buf bytes.Buffer
+	prev := byte(0)
+	oneByte := make([]byte, 1)
+
+	for {
+		n, err := r.Read(oneByte)
+		if n > 0 {
+			b := oneByte[0]
+			buf.WriteByte(b)
+
+			// Braille spinner prefix: two consecutive bytes 0xE2 0xA0.
+			// Read the completing third byte of the rune before breaking so the
+			// exec model receives a valid UTF-8 sequence from the reader.
+			if prev == 0xE2 && b == 0xA0 {
+				n2, _ := r.Read(oneByte)
+				if n2 > 0 {
+					buf.WriteByte(oneByte[0])
+				}
+				break
+			}
+			prev = b
+		}
+		if err != nil {
+			// Pipe closed (process exited before any task).
+			break
+		}
+	}
+
+	return io.MultiReader(&buf, r)
 }
 
 // runExecPanel starts a standalone Bubble Tea program showing the execution
