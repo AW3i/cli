@@ -251,6 +251,14 @@ func (e ExecModel) Update(msg tea.Msg) (ExecModel, tea.Cmd) {
 			// Empty msg means EOF (process exited) — stop re-queuing.
 			return e, readTaskCmd(e.ansibleOut, e.output)
 		}
+		// EOF from readTaskCmd — the stdout pipe is fully drained. All
+		// vsh_stdout content has been written to the output buffer. Only
+		// now is it safe to quit in CLI mode on success. Quitting here
+		// (rather than in execDoneMsg) prevents the race where tea.Quit
+		// fires before readTaskCmd writes vsh_stdout to the buffer.
+		if e.done && !e.withSidebar && e.err == nil {
+			return e, tea.Quit
+		}
 		return e, nil
 
 	case execTickMsg:
@@ -280,10 +288,11 @@ func (e ExecModel) Update(msg tea.Msg) (ExecModel, tea.Cmd) {
 		if e.cleanup != nil {
 			e.cleanup()
 		}
-		// In CLI mode (no sidebar): exit immediately on success.
-		if !e.withSidebar && e.err == nil {
-			return e, tea.Quit
-		}
+		// Do NOT quit here on success — wait for ansibleTaskMsg("") which
+		// signals that readTaskCmd has fully drained the stdout pipe and all
+		// vsh_stdout content has been written to the output buffer.
+		//
+		// On failure in CLI mode: fall through to key-press handling below.
 		// On failure: user must press a key first, then we show the prompt.
 		// Don't resize viewport yet — we'll do that on first keypress if needed.
 		return e, nil

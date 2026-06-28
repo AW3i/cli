@@ -744,3 +744,63 @@ func TestIsJSONTaskStart(t *testing.T) {
 		}
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Quit-on-EOF ordering: vsh_stdout must be written before tea.Quit fires
+// ---------------------------------------------------------------------------
+
+// TestExecModelQuitAfterStdoutDrained verifies that the model does NOT quit
+// when execDoneMsg arrives, and DOES quit only after ansibleTaskMsg("") (EOF)
+// — ensuring vsh_stdout has been fully written to the output buffer before
+// p.Run() returns.
+func TestExecModelQuitAfterStdoutDrained(t *testing.T) {
+	m := NewExecModel("service list", "1.0.0", false, nil, nil, nil, nil, 0, 80, 24)
+	m.done = false
+
+	// Simulate execDoneMsg arriving (process exited, success).
+	em2, cmd2 := m.Update(execDoneMsg{err: nil})
+
+	if !em2.done {
+		t.Error("execDoneMsg: done should be true")
+	}
+	// Must NOT quit here — stdout pipe not yet drained.
+	// execDoneMsg should return nil (not tea.Quit) in success CLI mode.
+	if cmd2 != nil {
+		t.Errorf("execDoneMsg should not return a cmd before stdout is drained, got %T", cmd2)
+	}
+
+	// Simulate ansibleTaskMsg("") — EOF from readTaskCmd (stdout fully drained).
+	_, cmd3 := em2.Update(ansibleTaskMsg(""))
+
+	// Now tea.Quit MUST be returned (CLI mode, no error, done=true).
+	if cmd3 == nil {
+		t.Error("ansibleTaskMsg('') after execDoneMsg should return tea.Quit cmd, got nil")
+	}
+}
+
+// TestExecModelNoQuitOnDoneWithoutEOF verifies that the model does not quit
+// when execDoneMsg arrives if ansibleTaskMsg("") hasn't fired yet.
+func TestExecModelNoQuitOnDoneWithoutEOF(t *testing.T) {
+	// Use a real (blocking) pipe so readTaskCmd is re-queued rather than returning nil.
+	pr, _ := io.Pipe()
+	m := NewExecModel("service list", "1.0.0", false, nil, pr, nil, nil, 0, 80, 24)
+
+	// execDoneMsg: should mark done but NOT quit.
+	em, cmd := m.Update(execDoneMsg{err: nil})
+
+	if !em.done {
+		t.Error("expected done=true after execDoneMsg")
+	}
+	// execDoneMsg on success must return nil (not tea.Quit).
+	if cmd != nil {
+		t.Errorf("execDoneMsg should not return a cmd before stdout is drained, got non-nil")
+	}
+
+	// Simulate a task message arriving while done=true (stdout still being read).
+	_, cmd2 := em.Update(ansibleTaskMsg("Gathering Facts"))
+
+	// Should re-queue readTaskCmd (cmd2 non-nil), not quit.
+	if cmd2 == nil {
+		t.Error("expected readTaskCmd to be re-queued when task name arrives after done, got nil")
+	}
+}
