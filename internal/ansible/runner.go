@@ -48,13 +48,6 @@ type ExtraVars struct {
 	// invoked. Ansible playbooks read this via lookup('env','OLDPWD') today;
 	// we pass it explicitly so the Go wrapper doesn't need the OLDPWD trick.
 	WorkDir string `json:"valet_current_path,omitempty"`
-	// BecomePassword, when non-empty, is passed as ansible_become_pass in
-	// extra-vars. This suppresses vars_prompt in playbooks that declare:
-	//   vars_prompt:
-	//     - name: "ansible_become_pass"
-	// Per Ansible source (playbook_executor.py): vars_prompt is skipped when
-	// the variable is already present in extra_vars.
-	BecomePassword string `json:"ansible_become_pass,omitempty"`
 }
 
 // RunOpts configures a single ansible-playbook invocation.
@@ -69,11 +62,6 @@ type RunOpts struct {
 	WorkDir string
 	// Verbose enables ansible-playbook -v output.
 	Verbose bool
-	// BecomePassword is the sudo password for Ansible become tasks.
-	// Only set when launching from the TUI — CLI mode uses stdin passthrough.
-	// The slice is zeroed immediately after being written to the subprocess
-	// environment so it does not linger in memory.
-	BecomePassword []byte
 }
 
 // Run executes the given playbook as a subprocess, streaming stdout/stderr
@@ -155,9 +143,16 @@ func Run(opts *RunOpts) error {
 // exit status — used by the TUI execution panel which needs the Go process
 // to stay alive for log tailing and rendering.
 //
+// Ansible's own vars_prompt handles any become-password prompt natively —
+// stdin is passed through to the subprocess so the user types the password
+// directly into Ansible's prompt before the TUI exec panel starts.
+//
 // The Ansible callback plugin writes spinner lines ("⠙ taskname\r") to stdout
 // for every task start. RunSubprocess pipes that stdout so the TUI can read
-// task names in real time without parsing the log file.
+// task names in real time without parsing the log file. The first byte on
+// the stdout pipe signals that vars_prompt has completed and tasks have begun;
+// the caller uses this to gate BubbleTea startup.
+//
 // stderr is discarded; structured output goes to the log file.
 //
 // Returns the started process, a reader for its stdout, and a cleanup func.
@@ -190,56 +185,40 @@ func RunSubprocess(opts *RunOpts) (*exec.Cmd, io.Reader, func(), error) {
 		extraVars.CLI.Opts = []string{}
 	}
 
-	// Track temp files for cleanup.
-	var tmpFiles []string
-	cleanup := func() {
-		for _, f := range tmpFiles {
-			os.Remove(f)
-		}
-	}
-
-	// --- Become password handling ---
-	var becomePasswordFile string
-
-	if len(opts.BecomePassword) > 0 {
-		bpf, err := writeSecretFile(opts.BecomePassword)
-		if err != nil {
-			cleanup()
-			return nil, nil, nil, fmt.Errorf("writing become-password-file: %w", err)
-		}
-		becomePasswordFile = bpf
-		tmpFiles = append(tmpFiles, bpf)
-
-		extraVars.BecomePassword = string(opts.BecomePassword)
-
-		for i := range opts.BecomePassword {
-			opts.BecomePassword[i] = 0
-		}
-	}
-
 	extraVarsJSON, err := json.Marshal(extraVars)
 	if err != nil {
-		cleanup()
 		return nil, nil, nil, fmt.Errorf("serializing extra vars: %w", err)
 	}
 
 	ansibleBin := platform.AnsiblePlaybookBin()
 	repoDir := platform.RepoDir()
 
-	args := []string{playbookPath}
-
-	evFile, err := writeSecretFile(extraVarsJSON)
+	// Write extra-vars to a temp file so they do not appear in the process
+	// list (ps aux). The file contains only non-sensitive routing data
+	// (cli.args, cli.opts, valet_current_path).
+	evFile, err := os.CreateTemp("", "valetsh-vars-*")
 	if err != nil {
+		return nil, nil, nil, fmt.Errorf("creating extra-vars file: %w", err)
+	}
+	evPath := evFile.Name()
+	cleanup := func() { os.Remove(evPath) }
+
+	if err := os.Chmod(evPath, 0600); err != nil {
+		evFile.Close()
+		cleanup()
+		return nil, nil, nil, fmt.Errorf("setting extra-vars file permissions: %w", err)
+	}
+	if _, err := evFile.Write(extraVarsJSON); err != nil {
+		evFile.Close()
 		cleanup()
 		return nil, nil, nil, fmt.Errorf("writing extra-vars file: %w", err)
 	}
-	tmpFiles = append(tmpFiles, evFile)
-	args = append(args, "-e", "@"+evFile)
-
-	if becomePasswordFile != "" {
-		args = append(args, "--become-password-file", becomePasswordFile)
+	if err := evFile.Close(); err != nil {
+		cleanup()
+		return nil, nil, nil, fmt.Errorf("closing extra-vars file: %w", err)
 	}
 
+	args := []string{playbookPath, "-e", "@" + evPath}
 	if opts.Verbose {
 		args = append(args, "-v")
 	}
@@ -255,12 +234,11 @@ func RunSubprocess(opts *RunOpts) (*exec.Cmd, io.Reader, func(), error) {
 	cmd.Dir = repoDir
 	cmd.Env = env
 
-	devNull, err := os.Open(os.DevNull)
-	if err != nil {
-		cleanup()
-		return nil, nil, nil, fmt.Errorf("opening /dev/null: %w", err)
-	}
-	cmd.Stdin = devNull
+	// Pass the real stdin through so Ansible's vars_prompt can ask for the
+	// become password natively. The caller (RunWithPanel) gates BubbleTea
+	// startup until the first byte appears on stdout — at that point
+	// vars_prompt has completed and stdin is no longer used by Ansible.
+	cmd.Stdin = os.Stdin
 
 	// Pipe stdout so the TUI can read task names in real time.
 	// The callback plugin prints "⠙ taskname\r" to stdout for each task start.
@@ -268,19 +246,15 @@ func RunSubprocess(opts *RunOpts) (*exec.Cmd, io.Reader, func(), error) {
 	// automatically closed when cmd.Wait() is called by waitForProcess.
 	stdoutPipe, err := cmd.StdoutPipe()
 	if err != nil {
-		devNull.Close()
 		cleanup()
 		return nil, nil, nil, fmt.Errorf("creating stdout pipe: %w", err)
 	}
 	cmd.Stderr = nil
 
 	if err = cmd.Start(); err != nil {
-		devNull.Close()
 		cleanup()
 		return nil, nil, nil, fmt.Errorf("starting ansible-playbook: %w", err)
 	}
-
-	devNull.Close()
 
 	return cmd, stdoutPipe, cleanup, nil
 }
@@ -386,34 +360,6 @@ func countTaskLines(output string) int {
 		count++
 	}
 	return count
-}
-
-// writeSecretFile writes data to a temp file with owner-only permissions (0600).
-// The caller is responsible for removing the file when no longer needed.
-func writeSecretFile(data []byte) (string, error) {
-	tmpFile, err := os.CreateTemp("", "valetsh-secret-*")
-	if err != nil {
-		return "", err
-	}
-
-	if err := os.Chmod(tmpFile.Name(), 0600); err != nil {
-		tmpFile.Close()
-		os.Remove(tmpFile.Name())
-		return "", err
-	}
-
-	if _, err := tmpFile.Write(data); err != nil {
-		tmpFile.Close()
-		os.Remove(tmpFile.Name())
-		return "", err
-	}
-
-	if err := tmpFile.Close(); err != nil {
-		os.Remove(tmpFile.Name())
-		return "", err
-	}
-
-	return tmpFile.Name(), nil
 }
 
 // setEnv sets or replaces a key in an environ slice (KEY=VALUE format).

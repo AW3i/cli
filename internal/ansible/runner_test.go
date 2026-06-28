@@ -130,16 +130,16 @@ Playbook without indentation should be skipped`,
 	}
 }
 
-// TestExtraVarsJSON verifies that ExtraVars marshals correctly to JSON,
-// particularly that ansible_become_pass is included with the correct key.
+// TestExtraVarsJSON verifies that ExtraVars marshals correctly to JSON.
+// ansible_become_pass must never appear in the extra-vars JSON — Ansible's
+// own vars_prompt handles the become password natively via stdin.
 func TestExtraVarsJSON(t *testing.T) {
 	ev := ExtraVars{
 		CLI: CLIVars{
 			Args: []string{"start", "mysql80"},
 			Opts: []string{},
 		},
-		WorkDir:        "/home/user/project",
-		BecomePassword: "secret123",
+		WorkDir: "/home/user/project",
 	}
 
 	jsonBytes, err := json.Marshal(ev)
@@ -149,44 +149,17 @@ func TestExtraVarsJSON(t *testing.T) {
 
 	jsonStr := string(jsonBytes)
 
-	// Verify the structure contains expected keys.
+	// Verify the expected routing fields are present.
 	if !strings.Contains(jsonStr, `"cli"`) {
 		t.Error("JSON missing 'cli' key")
 	}
 	if !strings.Contains(jsonStr, `"valet_current_path"`) {
 		t.Error("JSON missing 'valet_current_path' key")
 	}
-	if !strings.Contains(jsonStr, `"ansible_become_pass"`) {
-		t.Error("JSON missing 'ansible_become_pass' key - vars_prompt will not be suppressed!")
-	}
 
-	// Verify the password value is present (checking for a substring is sufficient).
-	if !strings.Contains(jsonStr, `"secret123"`) {
-		t.Error("JSON missing the become password value")
-	}
-}
-
-// TestExtraVarsJSONOmitEmpty verifies that ansible_become_pass is omitted
-// when empty, per the omitempty tag.
-func TestExtraVarsJSONOmitEmpty(t *testing.T) {
-	ev := ExtraVars{
-		CLI: CLIVars{
-			Args: []string{"db", "ls"},
-			Opts: []string{},
-		},
-		WorkDir:        "/home/user/project",
-		BecomePassword: "", // empty - should be omitted
-	}
-
-	jsonBytes, err := json.Marshal(ev)
-	if err != nil {
-		t.Fatalf("json.Marshal failed: %v", err)
-	}
-
-	jsonStr := string(jsonBytes)
-
-	// ansible_become_pass should NOT be present when empty.
+	// The become password must never appear in extra-vars: Ansible's
+	// vars_prompt handles it natively via stdin on the raw terminal.
 	if strings.Contains(jsonStr, `"ansible_become_pass"`) {
-		t.Error("JSON should not contain 'ansible_become_pass' when empty, but it does")
+		t.Error("JSON must not contain 'ansible_become_pass': password handling belongs to Ansible vars_prompt, not extra-vars")
 	}
 }

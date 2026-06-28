@@ -47,10 +47,21 @@ func main() {
 
 	// Launch TUI when: no arguments given, OR --vi flag was passed.
 	if len(os.Args) == 1 || vimMode {
-		_, err := tui.Run(root, Version, vimMode)
+		result, err := tui.Run(root, Version, vimMode)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "TUI error: %v\n", err)
 			os.Exit(1)
+		}
+
+		// The launcher quit with a selected command — dispatch it via RunWithPanel.
+		// This runs on the clean terminal after BubbleTea has torn down, so
+		// Ansible's vars_prompt (password) works natively before the exec panel
+		// takes over.
+		if len(result.Args) > 0 {
+			if err := tui.RunWithPanel(root, result.Args, Version); err != nil {
+				fmt.Fprintln(os.Stderr, commands.ErrorPrefix(err.Error()))
+				os.Exit(1)
+			}
 		}
 		os.Exit(0)
 	}
