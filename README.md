@@ -11,50 +11,82 @@ live execution panel and delegates to Ansible.
 
 ### Entry Point
 
-`cmd/valet/main.go` — Cobra root command with 17 subcommands. On every
-invocation:
+`cmd/valet/main.go` — Cobra root command. Commands are auto-discovered from
+`playbooks/*.yml` header annotations at startup. On every invocation:
 
 1. Periodic update check (weekly, skipped for `--help`/`--version`)
-2. No args → TUI launcher (`tui.Run`)
+2. No args → TUI launcher (`tui.Run`) → on command selection → `tui.RunWithPanel`
 3. Args on TTY → execution panel (`tui.RunWithPanel`)
 4. Args on non-TTY (CI/pipe) → `syscall.Exec` into `ansible-playbook` directly
 
 ### Package Structure
 
 ```
-cli/
 ├── cmd/valet/
 │   └── main.go              Entry point, routing between TUI and Ansible
 ├── internal/
 │   ├── ansible/             Subprocess runner (Run via syscall.Exec,
 │   │                        RunSubprocess for TUI panel)
-│   ├── commands/            Cobra command implementations (one file each)
+│   ├── commands/
+│   │   ├── discover.go      Auto-discovers cobra commands from playbooks/*.yml
+│   │   ├── hooks.go         PreRunE validation hooks (.valet-sh.yml checks)
+│   │   ├── help.go          Colored help formatter
+│   │   └── helpers.go       requireArgs / requireMinArgs validators
 │   ├── config/              .valet-sh.yml parser + global config reader
-│   ├── platform/            OS/arch detection, ansible-playbook path,
-│   │                        service name normalisation
+│   ├── platform/            OS/arch detection, ansible-playbook path
 │   ├── tui/                 Bubble Tea TUI (launcher, exec panel, log viewer)
 │   └── updater/             Weekly GitHub Releases update check
 └── .golangci.yml            Linting configuration
 ```
 
+### Command Auto-Discovery
+
+Commands are **not** defined in Go. `commands.Discover(repoDir)` scans
+`playbooks/*.yml` at startup and builds cobra commands from header annotations:
+
+```yaml
+# @command:     "service"
+# @description: "start/stop or enable/disable a service"
+# @usage:       "valet.sh service <start|stop|restart|enable|disable|default> svc"
+# @help:
+# start: start a valet-sh service
+# valet.sh service start mysql80
+```
+
+| Annotation | cobra field | Notes |
+|---|---|---|
+| `@command` | `cmd.Annotations["playbook"]` | Canonical playbook name, e.g. `project:env` |
+| `@description` | `cmd.Short` | Shown in list and TUI launcher |
+| `@usage` | `cmd.Use` | `valet.sh ` prefix is stripped |
+| `@help` | `cmd.Long` | Multi-line block until `---` separator |
+
+Playbooks with a colon in `@command` (e.g. `project:env`) are automatically
+grouped: `project` becomes a parent cobra command with `env` as a subcommand.
+
+**Adding a new command = adding a new `playbooks/<name>.yml` with annotations.**
+No Go code needs to be written or modified.
+
 ### TUI Package (`internal/tui/`)
 
 | File | Responsibility |
 |---|---|
-| `launcher.go` | Root Bubble Tea model: navigation stack, screen state machine |
+| `launcher.go` | Navigation-only model: command bar, inline box, quits with `Result.Args` on Enter |
 | `list.go` | `CommandItem` (list.Item), custom delegate, arg parsing from cobra `Use` |
 | `args.go` | Argument input pane (`bubbles/textinput` per arg) |
 | `exec.go` | `ExecModel`: live log panel, `debug.log` tail, log viewer on failure |
-| `runner.go` | `RunWithPanel()` entry point, `standaloneExecModel` wrapper |
+| `runner.go` | `RunWithPanel()` entry point, `waitForFirstTask()` gate, `standaloneExecModel` |
+| `inline.go` | Inline command box (arg input + docs display) |
 | `styles.go` | Lip Gloss styles matching the Ansible callback colour palette |
 
 **Screen state machine:**
 
 ```
-screenList    →  (enter on leaf)   →  screenInline
-screenInline  →  (enter)           →  screenPassword
-screenPassword → (enter)           →  screenExec
-screenExec    →  (done, failure)   →  logViewOpen = true
+screenList    →  (enter on leaf)  →  screenInline
+screenInline  →  (enter)          →  [launcher quits, Result.Args set]
+                                      → main.go calls RunWithPanel
+                                          → waitForFirstTask() blocks
+                                          → BubbleTea exec panel starts
+screenExec    →  (done, failure)  →  logViewOpen = true
 ```
 
 **Two execution paths:**
@@ -64,11 +96,72 @@ screenExec    →  (done, failure)   →  logViewOpen = true
 | `ansible.Run()` | Non-TTY / direct cobra dispatch | `syscall.Exec` — replaces current process |
 | `ansible.RunSubprocess()` | TUI panel | `exec.Cmd.Start()` — Go stays alive for log tailing |
 
+---
+
+### Password Handling & TUI Startup Gate
+
+Ansible playbooks that require privilege escalation declare `vars_prompt` for
+`ansible_become_pass`. Go **never touches the password** — Ansible handles it
+natively via its own prompt mechanism.
+
+#### How it works
+
+`RunSubprocess` passes `cmd.Stdin = os.Stdin` to the Ansible subprocess.
+When the playbook starts, Ansible's `vars_prompt` prompts for the password on
+the raw terminal. Go gates BubbleTea startup on `waitForFirstTask()`.
+
+#### The startup gate (`waitForFirstTask`)
+
+The valet-sh callback plugin (`plugins/callback/valet-sh.py`) writes to the
+subprocess's stdout in this order:
+
+```
+1. \033[?25h          — CURSOR_SHOW, at module import (first byte 0x1B)
+2. ▶ play-name\n      — v2_playbook_on_play_start, before vars_prompt
+3.                    — vars_prompt fires here; Ansible reads password from stdin
+4. ⠙ task-name\r      — v2_playbook_on_task_start, first task starts
+```
+
+`waitForFirstTask()` reads the stdout pipe byte-by-byte, buffering everything,
+until it detects the 2-byte UTF-8 prefix `\xe2\xa0` — which uniquely
+identifies a Braille spinner character (U+2800..U+28FF). This prefix only
+appears at step 4, guaranteeing that `vars_prompt` (step 3) has completed and
+stdin is free before BubbleTea takes over.
+
+**Why `\xe2\xa0` and not just `\xe2`?**
+
+Both the spinner characters and the play-start `▶` (U+25B6) start with `\xe2`.
+The spinner chars (U+2800..U+28FF) all have `\xe2\xa0` as their first two
+bytes, while `▶` encodes as `\xe2\x96\xb6` (second byte `0x96`). Checking two
+bytes avoids triggering the gate on the play-start line.
+
+| Character | Codepoint | UTF-8 | Triggers gate? |
+|---|---|---|---|
+| `⠙` (spinner) | U+2819 | `\xe2\xa0\x99` | Yes |
+| `▶` (play-start) | U+25B6 | `\xe2\x96\xb6` | No |
+| ESC (CURSOR_SHOW) | — | `\x1b...` | No |
+
+All bytes consumed while waiting are returned via `io.MultiReader` so the exec
+panel receives the complete, unmodified stdout stream.
+
+**If Ansible exits before any task** (e.g. syntax error, missing playbook),
+the stdout pipe closes. `waitForFirstTask` returns the buffered bytes and
+`runExecPanel` starts immediately, receiving `execDoneMsg` with the error.
+
+#### TUI launcher path
+
+The launcher is navigation-only. On Enter, it stores `selectedArgs` and returns
+`tea.Quit`. `tui.Run()` returns `Result{Args: selectedArgs}`. `main.go` then
+calls `RunWithPanel(root, result.Args, Version)` on the clean terminal after
+BubbleTea has torn down — so `vars_prompt` fires on the raw terminal, then the
+exec panel BubbleTea starts after `waitForFirstTask` unblocks.
+
+---
+
 ### Key Design Decisions
 
-1. **Go orchestrates, Ansible executes** — the Go CLI adds UX (typed validation,
-   help, TUI) but all heavy lifting remains in Ansible. Individual commands will
-   gradually be reimplemented in Go where it makes sense.
+1. **Go orchestrates, Ansible executes** — the Go CLI adds UX (auto-discovery,
+   typed validation, help, TUI) but all heavy lifting remains in Ansible.
 
 2. **`syscall.Exec` for non-interactive** — signals (Ctrl-C) flow directly to
    `ansible-playbook`, Go process vanishes from the process table. Used when
@@ -77,10 +170,15 @@ screenExec    →  (done, failure)   →  logViewOpen = true
 3. **`RunSubprocess` for TUI** — Go stays alive to tail `debug.log` and render
    the scrollable execution panel while Ansible runs.
 
-4. **No `//nolint` comments** — use `.golangci.yml` exclusions with an
-   explanation. See the root `README.md` for the full rule.
+4. **Ansible owns the password** — `ansible_become_pass` is never collected,
+   stored, or passed by Go. `vars_prompt` in the playbook handles it natively
+   via the raw terminal. `waitForFirstTask()` gates BubbleTea startup on the
+   first spinner character so stdin is free during the password prompt.
 
-5. **Bubble Tea value receivers** — required by the Elm architecture.
+5. **No `//nolint` comments** — use `.golangci.yml` exclusions with an
+   explanation.
+
+6. **Bubble Tea value receivers** — required by the Elm architecture.
    `hugeParam` warnings are excluded in `.golangci.yml` for all `internal/tui/`
    files. Do not convert to pointer receivers.
 
@@ -96,9 +194,8 @@ screenExec    →  (done, failure)   →  logViewOpen = true
 ### Build
 
 ```bash
-cd cli
-make build          # Build for current OS/arch → ../dist/valet
-make build-all      # Cross-compile for all 4 platforms → ../dist/
+make build          # Build for current OS/arch → dist/valet
+make build-all      # Cross-compile for all 4 platforms → dist/
 make install        # Build + copy to /usr/local/valet-sh/bin/valet
 ```
 
@@ -159,13 +256,19 @@ instance:
 
 ## Commands
 
-All 17 commands follow the same pattern:
+Commands are auto-discovered from `playbooks/*.yml` header annotations. To add
+a command, add a new playbook with the required annotations — no Go code needed.
 
-1. Parse CLI args with Cobra
-2. Validate `.valet-sh.yml` if relevant (typed Go structs, clear errors)
-3. Build extra-vars JSON for Ansible
-4. On TTY: start `ansible.RunSubprocess()` + show execution panel
-5. On non-TTY: call `ansible.Run()` which `syscall.Exec`s into `ansible-playbook`
+Commands that require a valid `.valet-sh.yml` in the current directory (`link`,
+`init-instance`) have a `PreRunE` hook registered by `commands.ApplyHooks()`.
+
+All commands follow the same runtime pattern:
+
+1. `commands.Discover()` builds the cobra command from playbook annotations
+2. Cobra parses args; `hooks.go` validates `.valet-sh.yml` if needed
+3. `resolveRunOpts()` builds `ansible.RunOpts` (reads `cmd.Annotations["playbook"]`)
+4. On TTY: `ansible.RunSubprocess()` + `waitForFirstTask()` + exec panel
+5. On non-TTY: `ansible.Run()` → `syscall.Exec` into `ansible-playbook`
 
 ---
 
@@ -200,7 +303,10 @@ All 17 commands follow the same pattern:
 - `syscall.Exec` argv is constructed from platform constants + cobra-parsed args
 - `tailFile()` path is always the hardcoded `logPath` constant, not user input
 - `go.sum` pins exact SHA-256 hashes for all Go module dependencies
-- GitHub Actions in CI use `@v4`/`@v5` tags — **todo: pin to commit SHAs**
+- Ansible's `ansible_become_pass` is never collected or stored by Go;
+  `vars_prompt` in the playbook prompts natively on the raw terminal
+- `waitForFirstTask()` gates BubbleTea on `\xe2\xa0` (Braille spinner prefix),
+  ensuring stdin is free before BubbleTea takes ownership
 
 ---
 
