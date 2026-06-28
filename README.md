@@ -199,6 +199,37 @@ make build-all      # Cross-compile for all 4 platforms → dist/
 make install        # Build + copy to /usr/local/valet-sh/bin/valet
 ```
 
+### Running against a local valet-sh checkout
+
+By default the binary reads playbooks and `ansible.cfg` from the **installed**
+path `/usr/local/valet-sh/valet-sh`. During development you want to point it at
+your local `valet-sh` checkout instead — without overwriting the production
+install.
+
+Set `VALET_REPO_DIR` before running the dev binary:
+
+```bash
+export VALET_REPO_DIR=/path/to/valet-sh
+
+# Now the binary uses your local playbooks and ansible.cfg
+./dist/valet service list
+./dist/valet --help
+```
+
+When `VALET_REPO_DIR` is set the binary prints a notice at the end of every
+command so you always know which repo is active:
+
+```
+[dev] repo: /path/to/valet-sh
+```
+
+Add the export to your shell profile (`~/.bashrc` / `~/.zshrc`) to make it
+permanent for your development session, or prefix individual commands:
+
+```bash
+VALET_REPO_DIR=/path/to/valet-sh ./dist/valet service list
+```
+
 ### Test
 
 ```bash

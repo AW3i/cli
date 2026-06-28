@@ -28,6 +28,7 @@ import (
 	"github.com/charmbracelet/x/term"
 	"github.com/spf13/cobra"
 	"github.com/valet-sh/cli/internal/ansible"
+	"github.com/valet-sh/cli/internal/platform"
 )
 
 // RunWithPanel executes a valet command via ansible-playbook and shows
@@ -178,6 +179,12 @@ func runExecPanel(command, version string, proc *exec.Cmd, ansibleOut io.Reader,
 	if outputBuf.Len() > 0 {
 		fmt.Println()
 		fmt.Println(outputBuf.String())
+	}
+
+	// When running with a custom repo path (VALET_REPO_DIR), print a brief
+	// notice so the developer knows which repo was used for this run.
+	if devDir := platform.DevRepoDir(); devDir != "" {
+		fmt.Fprintf(os.Stderr, "\n[dev] repo: %s\n", devDir)
 	}
 
 	if fm, ok := final.(standaloneExecModel); ok {

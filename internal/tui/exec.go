@@ -176,6 +176,12 @@ type ExecModel struct {
 	// logViewOpen is true once the user has said Y and the log viewer is active.
 	logViewOpen bool
 
+	// stdoutEOF is true once readTaskCmd has returned ansibleTaskMsg(""),
+	// meaning the stdout pipe has been fully drained and all vsh_stdout
+	// content has been written to the output buffer. Used to coordinate
+	// the quit decision when ansibleTaskMsg("") arrives before execDoneMsg.
+	stdoutEOF bool
+
 	// width/height of the available area.
 	width  int
 	height int
@@ -252,10 +258,12 @@ func (e ExecModel) Update(msg tea.Msg) (ExecModel, tea.Cmd) {
 			return e, readTaskCmd(e.ansibleOut, e.output)
 		}
 		// EOF from readTaskCmd — the stdout pipe is fully drained. All
-		// vsh_stdout content has been written to the output buffer. Only
-		// now is it safe to quit in CLI mode on success. Quitting here
-		// (rather than in execDoneMsg) prevents the race where tea.Quit
-		// fires before readTaskCmd writes vsh_stdout to the buffer.
+		// vsh_stdout content has been written to the output buffer.
+		e.stdoutEOF = true
+		// Quit in CLI success mode only when execDoneMsg has also arrived.
+		// If execDoneMsg arrives first (common): done=true here → quit now.
+		// If ansibleTaskMsg("") arrives first (less common): done=false →
+		// set stdoutEOF=true and wait; execDoneMsg handler will quit below.
 		if e.done && !e.withSidebar && e.err == nil {
 			return e, tea.Quit
 		}
@@ -288,11 +296,14 @@ func (e ExecModel) Update(msg tea.Msg) (ExecModel, tea.Cmd) {
 		if e.cleanup != nil {
 			e.cleanup()
 		}
-		// Do NOT quit here on success — wait for ansibleTaskMsg("") which
-		// signals that readTaskCmd has fully drained the stdout pipe and all
-		// vsh_stdout content has been written to the output buffer.
-		//
-		// On failure in CLI mode: fall through to key-press handling below.
+		// Quit in CLI success mode only after stdout is fully drained.
+		// If stdoutEOF is already true (ansibleTaskMsg("") arrived first):
+		// safe to quit now — buffer is complete.
+		// If stdoutEOF is false (ansibleTaskMsg("") hasn't arrived yet):
+		// don't quit yet — ansibleTaskMsg("") handler will quit when it fires.
+		if !e.withSidebar && e.err == nil && e.stdoutEOF {
+			return e, tea.Quit
+		}
 		// On failure: user must press a key first, then we show the prompt.
 		// Don't resize viewport yet — we'll do that on first keypress if needed.
 		return e, nil
