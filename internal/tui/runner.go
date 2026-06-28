@@ -15,6 +15,7 @@
 package tui
 
 import (
+	"bytes"
 	"fmt"
 	"io"
 	"os"
@@ -27,21 +28,18 @@ import (
 	"github.com/valet-sh/cli/internal/ansible"
 )
 
-// promptPassword prints a password prompt to stderr and reads a masked
-// password from stdin. Called before BubbleTea takes over the terminal.
-// The returned bytes do not include the trailing newline.
-func promptPassword() ([]byte, error) {
-	fmt.Fprint(os.Stderr, "[sudo] Password: ")
-	password, err := term.ReadPassword(os.Stdin.Fd())
-	fmt.Fprintln(os.Stderr) // restore newline after hidden input
-	return password, err
-}
-
 // RunWithPanel executes a valet command via ansible-playbook and shows
-// the live execution panel (header + progress placeholder + log tail).
+// the live execution panel (header + spinner + log tail).
 //
 // It resolves the ansible RunOpts from the cobra command tree using the
 // provided args slice (e.g. ["service", "start", "php83"]).
+//
+// Ansible's own vars_prompt handles any become-password prompt natively:
+// stdin is connected to the subprocess so the user types directly into
+// Ansible's prompt. BubbleTea only takes over the terminal after the first
+// byte appears on Ansible's stdout — the callback plugin emits its first
+// spinner line only after vars_prompt has completed and tasks have begun.
+// This guarantees stdin is free before BubbleTea needs it for key events.
 //
 // When stdout is not a TTY (CI, pipes), it falls back to the normal
 // cobra/ansible path so non-interactive usage is never affected.
@@ -61,22 +59,34 @@ func RunWithPanel(root *cobra.Command, args []string, version string) error {
 		return root.Execute()
 	}
 
-	// Collect sudo password from the terminal before BubbleTea takes over.
-	// The password is then written to a secure temp file and passed to Ansible
-	// via --become-password-file and in extra-vars (to suppress vars_prompt).
-	password, err := promptPassword()
-	if err != nil {
-		return fmt.Errorf("reading password: %w", err)
-	}
-	opts.BecomePassword = password
-
 	proc, ansibleOut, cleanup, err := ansible.RunSubprocess(opts)
 	if err != nil {
 		return fmt.Errorf("starting ansible-playbook: %w", err)
 	}
 
+	// Gate BubbleTea startup on the first byte from Ansible's stdout.
+	//
+	// The callback plugin writes its first spinner line ("⠙ taskname\r") only
+	// after Ansible has finished processing vars_prompt — so blocking here
+	// ensures the password prompt is fully complete before BubbleTea takes
+	// over the terminal and stdin.
+	//
+	// If Ansible exits before writing anything (e.g. playbook syntax error),
+	// the pipe closes and Read returns io.EOF; we fall through and start the
+	// exec panel which will immediately receive the exit error.
+	firstByte := make([]byte, 1)
+	n, _ := ansibleOut.Read(firstByte)
+
+	// Reconstruct a reader that includes the byte we already consumed.
+	var taskOut io.Reader
+	if n > 0 {
+		taskOut = io.MultiReader(bytes.NewReader(firstByte[:n]), ansibleOut)
+	} else {
+		taskOut = ansibleOut
+	}
+
 	commandStr := strings.Join(args, " ")
-	return runExecPanel(commandStr, version, proc, ansibleOut, cleanup, 0)
+	return runExecPanel(commandStr, version, proc, taskOut, cleanup, 0)
 }
 
 // runExecPanel starts a standalone Bubble Tea program showing the execution
@@ -140,8 +150,13 @@ func resolveRunOpts(root *cobra.Command, args []string) (*ansible.RunOpts, error
 		return nil, fmt.Errorf("unknown command: %s", args[0])
 	}
 
-	// The cobra Use field contains the command name as the first word.
-	playbook := strings.SplitN(cmd.Use, " ", 2)[0]
+	// Prefer the canonical playbook name stored by discover.go in Annotations.
+	// Falls back to the first word of cmd.Use for commands not built via Discover
+	// (e.g. in tests).
+	playbook := cmd.Annotations["playbook"]
+	if playbook == "" {
+		playbook = strings.SplitN(cmd.Use, " ", 2)[0]
+	}
 
 	// Separate positional args from opts (flags starting with "-").
 	var positionalArgs, opts []string

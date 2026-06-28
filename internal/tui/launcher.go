@@ -22,17 +22,15 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 	"github.com/spf13/cobra"
-	"github.com/valet-sh/cli/internal/ansible"
 )
 
 // screen tracks which state the launcher is in.
 type screen int
 
 const (
-	screenList     screen = iota // navigating the horizontal command bar
-	screenInline                 // inline box open (arg input + docs)
-	screenPassword               // sudo password prompt shown before exec
-	screenExec                   // ansible is running, exec panel shown
+	screenList   screen = iota // navigating the horizontal command bar
+	screenInline               // inline box open (arg input + docs)
+	screenExec                 // ansible is running, exec panel shown
 )
 
 // stackEntry records a navigation level so we can Esc back.
@@ -66,10 +64,6 @@ type model struct {
 	// with arguments (or any command, for previewing) is selected.
 	inlineBox *InlineBox
 
-	// passwordBox is shown before executing a command that requires sudo.
-	// It is discarded immediately after the password is handed to Ansible.
-	passwordBox *PasswordBox
-
 	// activeScreen controls which component receives keystrokes.
 	activeScreen screen
 
@@ -80,6 +74,10 @@ type model struct {
 	// ansible-playbook --list-tasks before the run. Zero means unknown.
 	totalTasks int
 
+	// selectedArgs holds the argv to dispatch after the launcher quits.
+	// Set by executeCommand(); read by Run() to populate Result.Args.
+	selectedArgs []string
+
 	// width/height of the terminal at last WindowSizeMsg.
 	width  int
 	height int
@@ -88,24 +86,31 @@ type model struct {
 // Result is returned by Run() after the TUI exits.
 type Result struct {
 	// Args is the argv slice to dispatch, e.g. ["service", "start", "php83"].
-	// Empty means the user cancelled.
+	// Empty means the user cancelled or the command was handled internally.
 	Args []string
 }
 
 // Run launches the interactive TUI launcher.
 // vimMode starts the launcher with vim-style navigation enabled.
+//
+// When the user selects and confirms a command, Run quits BubbleTea and
+// returns Result.Args so the caller can dispatch via RunWithPanel. This
+// keeps the launcher as a pure navigation layer — Ansible's vars_prompt
+// (password prompt) runs on the raw terminal before BubbleTea restarts
+// as the exec panel.
 func Run(root *cobra.Command, version string, vimMode bool) (Result, error) {
 	m := newModel(root, version, vimMode)
 	p := tea.NewProgram(m)
 
-	_, err := p.Run()
+	final, err := p.Run()
 	if err != nil {
 		return Result{}, err
 	}
 
-	// Execution is handled internally by transitioning to screenExec.
-	// Result.Args is never populated — we return empty to signal the caller
-	// that no further dispatch is needed.
+	if fm, ok := final.(model); ok && len(fm.selectedArgs) > 0 {
+		return Result{Args: fm.selectedArgs}, nil
+	}
+
 	return Result{}, nil
 }
 
@@ -191,9 +196,6 @@ func (m model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case screenInline:
 		return m.handleInlineKey(key, msg)
 
-	case screenPassword:
-		return m.handlePasswordKey(key, msg)
-
 	case screenExec:
 		var cmd tea.Cmd
 		m.execModel, cmd = m.execModel.Update(msg)
@@ -262,8 +264,11 @@ func (m model) handleInlineKey(key string, msg tea.KeyPressMsg) (tea.Model, tea.
 		return m, nil
 
 	case "enter":
-		// Transition to the password screen before executing.
-		return m.openPasswordScreen()
+		// Collect the selected args, store them, and quit the launcher.
+		// The caller (main.go via Run()) reads selectedArgs and dispatches
+		// via RunWithPanel, which gates BubbleTea restart on Ansible's first
+		// task output — after any vars_prompt password input is done.
+		return m.executeCommand()
 	}
 
 	// Route to inline box for doc scrolling and text input.
@@ -271,57 +276,6 @@ func (m model) handleInlineKey(key string, msg tea.KeyPressMsg) (tea.Model, tea.
 		var cmd tea.Cmd
 		updated, cmd := m.inlineBox.Update(msg)
 		m.inlineBox = &updated
-		return m, cmd
-	}
-
-	return m, nil
-}
-
-// openPasswordScreen transitions to screenPassword before executing a command.
-// It also pre-parses the playbook with --list-tasks to count total tasks
-// for the progress bar.
-func (m model) openPasswordScreen() (tea.Model, tea.Cmd) {
-	if m.inlineBox == nil {
-		return m, nil
-	}
-
-	// Build the command string for the password box header.
-	commandStr := m.commandPathFromStack()
-	if val := m.inlineBox.Value(); val != "" {
-		commandStr += " " + val
-	}
-
-	// Using spinner for progress instead of progress bar.
-	m.totalTasks = 0
-
-	box := NewPasswordBox(commandStr, m.width)
-	m.passwordBox = &box
-	m.activeScreen = screenPassword
-	return m, nil
-}
-
-// handlePasswordKey handles key events on the password screen.
-func (m model) handlePasswordKey(key string, msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
-	switch key {
-	case "esc":
-		// Cancel — return to inline box.
-		m.passwordBox = nil
-		m.activeScreen = screenInline
-		return m, nil
-
-	case "enter":
-		if m.passwordBox != nil && m.passwordBox.IsEmpty() {
-			// Show inline error — don't execute with an empty password.
-			m.passwordBox.MarkEmptyError()
-			return m, nil
-		}
-		return m.executeWithPassword()
-	}
-
-	if m.passwordBox != nil {
-		var cmd tea.Cmd
-		updated, cmd := m.passwordBox.Update(msg)
-		m.passwordBox = &updated
 		return m, cmd
 	}
 
@@ -365,37 +319,14 @@ func (m model) argsFromInlineBox() []string {
 	return args
 }
 
-// executeWithPassword collects the password from the password screen,
-// then starts the ansible subprocess with it.
-func (m model) executeWithPassword() (tea.Model, tea.Cmd) {
+// executeCommand stores the selected command args and quits the launcher.
+// The caller reads selectedArgs from the final model state via Run().
+func (m model) executeCommand() (tea.Model, tea.Cmd) {
 	if m.inlineBox == nil {
 		return m, nil
 	}
-
-	args := m.argsFromInlineBox()
-	opts, err := resolveRunOpts(m.root, args)
-	if err != nil {
-		return m, tea.Quit
-	}
-
-	// Take the password and attach it to opts. The password slice is zeroed
-	// inside RunSubprocess() immediately after being written to the env.
-	if m.passwordBox != nil {
-		opts.BecomePassword = m.passwordBox.TakePassword()
-		m.passwordBox = nil
-	}
-
-	proc, ansibleOut, cleanup, err := ansible.RunSubprocess(opts)
-	if err != nil {
-		return m, tea.Quit
-	}
-
-	commandStr := strings.Join(args, " ")
-	m.execModel = NewExecModel(commandStr, m.version, true, proc, ansibleOut, cleanup, m.totalTasks, m.width, m.height)
-	m.activeScreen = screenExec
-	m.inlineBox = nil
-
-	return m, m.execModel.Init()
+	m.selectedArgs = m.argsFromInlineBox()
+	return m, tea.Quit
 }
 
 // pushStack navigates into a submenu.
@@ -424,12 +355,6 @@ func (m model) routeMsg(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.inlineBox != nil {
 			updated, c := m.inlineBox.Update(msg)
 			m.inlineBox = &updated
-			cmd = c
-		}
-	case screenPassword:
-		if m.passwordBox != nil {
-			updated, c := m.passwordBox.Update(msg)
-			m.passwordBox = &updated
 			cmd = c
 		}
 	case screenExec:
@@ -474,15 +399,6 @@ func (m model) render() string {
 	_, _ = fmt.Fprintln(&output, dividerLine(m.width))
 
 	switch {
-	case m.activeScreen == screenPassword && m.passwordBox != nil:
-		// Focused password screen: hide command list, show only password input
-		_, _ = fmt.Fprintln(&output, "  "+m.passwordBox.InputView())
-		_, _ = fmt.Fprintln(&output, dividerLine(m.width))
-		_, _ = fmt.Fprint(&output,
-			styles.HelpKey.Render("↵")+styles.HelpDesc.Render(" confirm")+" · "+
-				styles.HelpKey.Render("esc")+styles.HelpDesc.Render(" back")+" · "+
-				m.passwordBox.View(),
-		)
 	case m.activeScreen == screenInline && m.inlineBox != nil:
 		_, _ = fmt.Fprintln(&output, renderHorizontalList(m.commandList, m.width))
 		_, _ = fmt.Fprintln(&output, m.inlineBox.View())
@@ -508,12 +424,6 @@ func (m model) headerView() string {
 		crumbs[i] = m.stack[i].title
 	}
 	breadcrumb := strings.Join(crumbs, " › ")
-
-	// For screenPassword, extend the breadcrumb to include the full command args.
-	// e.g., "valet.sh › service › restart nginx"
-	if m.activeScreen == screenPassword && m.passwordBox != nil {
-		breadcrumb = breadcrumb + " › " + m.passwordBox.command
-	}
 
 	title := styles.Header.Render("▶ " + breadcrumb)
 
