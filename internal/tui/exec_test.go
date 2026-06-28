@@ -626,3 +626,84 @@ func TestAppendLinesSkipsMetaTasks(t *testing.T) {
 		t.Errorf("expected currentTask to be 'do important thing' task, got %q", m.currentTask)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// waitForFirstTask
+// ---------------------------------------------------------------------------
+
+// TestWaitForFirstTask_SpinnerAfterPreamble verifies that waitForFirstTask
+// blocks on CURSOR_SHOW and play-start output and only unblocks on the first
+// Braille spinner character, preserving all bytes for the exec model.
+func TestWaitForFirstTask_SpinnerAfterPreamble(t *testing.T) {
+	// Mimic exact callback plugin output order:
+	//   1. CURSOR_SHOW escape (\033[?25h)
+	//   2. play-start line with ▶ (U+25B6 = \xe2\x96\xb6)
+	//   3. FLUSH + spinner task line (spinner ⠙ = U+2819 = \xe2\xa0\x99)
+	cursorShow := "\033[?25h"
+	playStart := "\033[1;34m\xe2\x96\xb6\033[0;0m play-name\033[?25l\n"
+	taskLine := "\033[2K\r\033[0;32m\xe2\xa0\x99\033[0;0m Gathering Facts\r"
+	input := cursorShow + playStart + taskLine + " more data"
+
+	r := strings.NewReader(input)
+	result := waitForFirstTask(r)
+
+	got, err := io.ReadAll(result)
+	if err != nil {
+		t.Fatalf("ReadAll error: %v", err)
+	}
+
+	if string(got) != input {
+		t.Errorf("expected full input preserved\ngot:  %q\nwant: %q", string(got), input)
+	}
+}
+
+// TestWaitForFirstTask_PlayStartNotTrigger verifies that the play-start ▶
+// character (U+25B6, \xe2\x96\xb6) does NOT trigger the gate — only the
+// Braille spinner prefix \xe2\xa0 does.
+func TestWaitForFirstTask_PlayStartNotTrigger(t *testing.T) {
+	// ▶ is \xe2\x96\xb6; spinner ⠙ is \xe2\xa0\x99
+	input := "\xe2\x96\xb6 play-name\n\xe2\xa0\x99 first task\r"
+	r := strings.NewReader(input)
+	result := waitForFirstTask(r)
+
+	got, err := io.ReadAll(result)
+	if err != nil {
+		t.Fatalf("ReadAll error: %v", err)
+	}
+	if string(got) != input {
+		t.Errorf("all bytes should be preserved\ngot:  %q\nwant: %q", string(got), input)
+	}
+}
+
+// TestWaitForFirstTask_EarlyEOF verifies that if the pipe closes before any
+// spinner character (e.g. Ansible crashes at startup), waitForFirstTask
+// returns whatever bytes were buffered without blocking forever.
+func TestWaitForFirstTask_EarlyEOF(t *testing.T) {
+	// Only CURSOR_SHOW and a play-start line, then EOF — no task ever starts.
+	input := "\033[?25h\xe2\x96\xb6 play\n"
+	r := strings.NewReader(input)
+	result := waitForFirstTask(r)
+
+	got, err := io.ReadAll(result)
+	if err != nil {
+		t.Fatalf("ReadAll error: %v", err)
+	}
+	if string(got) != input {
+		t.Errorf("early EOF: bytes should be preserved\ngot:  %q\nwant: %q", string(got), input)
+	}
+}
+
+// TestWaitForFirstTask_EmptyInput verifies graceful handling of an immediately
+// closed pipe (e.g. Ansible fails before writing anything).
+func TestWaitForFirstTask_EmptyInput(t *testing.T) {
+	r := strings.NewReader("")
+	result := waitForFirstTask(r)
+
+	got, err := io.ReadAll(result)
+	if err != nil {
+		t.Fatalf("ReadAll error: %v", err)
+	}
+	if len(got) != 0 {
+		t.Errorf("expected empty output, got %q", string(got))
+	}
+}
