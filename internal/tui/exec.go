@@ -17,11 +17,11 @@ package tui
 import (
 	"bufio"
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
-	"regexp"
 	"strings"
 	"syscall"
 	"time"
@@ -82,11 +82,14 @@ type execDoneMsg struct{ err error }
 type logViewReadyMsg struct{ lines []string }
 
 // ansibleTaskMsg carries a task name read from ansible-playbook's stdout.
-// The callback plugin writes "⠙ taskname\r" to stdout for each task start.
+// ansible.posix.jsonl emits a JSON line per event; we extract the task name
+// from v2_playbook_on_task_start / v2_runner_on_start events.
 type ansibleTaskMsg string
 
-// ansiEscape matches ANSI escape sequences (colors, cursor control, erase).
-var ansiEscape = regexp.MustCompile(`\x1b\[[0-9;?]*[a-zA-Z]|\x1b\[2K`)
+// ansibleOutputMsg carries vsh_stdout content (tables, listings) extracted
+// from v2_runner_on_ok events. Accumulated in capturedOutput and printed
+// to the terminal after the exec panel exits.
+type ansibleOutputMsg string
 
 // ExecModel is a Bubble Tea model that shows a scrollable live log panel
 // while an ansible-playbook subprocess is running. On failure it offers
@@ -168,6 +171,11 @@ type ExecModel struct {
 	// logViewOpen is true once the user has said Y and the log viewer is active.
 	logViewOpen bool
 
+	// capturedOutput accumulates vsh_stdout content from ansibleOutputMsg events
+	// (tables, db listings, etc.). Printed to the terminal after the exec panel
+	// exits via CapturedOutput().
+	capturedOutput []string
+
 	// width/height of the available area.
 	width  int
 	height int
@@ -231,7 +239,7 @@ func (e ExecModel) Init() tea.Cmd {
 func (e ExecModel) Update(msg tea.Msg) (ExecModel, tea.Cmd) {
 	switch msg := msg.(type) {
 	case ansibleTaskMsg:
-		// A new task name arrived from ansible's stdout pipe.
+		// A new task name arrived from ansible's stdout JSON stream.
 		if string(msg) != "" {
 			e.currentTask = string(msg)
 			// Queue the next read only when we got real data.
@@ -239,6 +247,14 @@ func (e ExecModel) Update(msg tea.Msg) (ExecModel, tea.Cmd) {
 			return e, readTaskCmd(e.ansibleOut)
 		}
 		return e, nil
+
+	case ansibleOutputMsg:
+		// vsh_stdout content (tables, listings) from a runner_on_ok event.
+		// Accumulate for printing after the exec panel exits.
+		if string(msg) != "" {
+			e.capturedOutput = append(e.capturedOutput, string(msg))
+		}
+		return e, readTaskCmd(e.ansibleOut)
 
 	case execTickMsg:
 		lines := e.readNewLogLines()
@@ -578,6 +594,13 @@ func (e ExecModel) IsDone() bool { return e.done }
 // Err returns the subprocess exit error, if any.
 func (e ExecModel) Err() error { return e.err }
 
+// CapturedOutput returns all vsh_stdout content accumulated during the run,
+// joined with newlines. Empty string means no output was captured.
+// Called after the exec panel exits to print tables/listings to the terminal.
+func (e ExecModel) CapturedOutput() string {
+	return strings.Join(e.capturedOutput, "\n")
+}
+
 // copyToClipboardOSC52 copies the given text to the system clipboard using the
 // OSC 52 escape sequence. This works in modern terminals like iTerm2, Kitty,
 // WezTerm, Alacritty, and tmux (with set-clipboard on). If the terminal doesn't
@@ -723,80 +746,79 @@ func waitForProcess(cmd *exec.Cmd) tea.Cmd {
 	}
 }
 
-// readTaskCmd returns a tea.Cmd that blocks reading from r until it gets a
-// real task name from ansible-playbook's stdout, then delivers it as an
-// ansibleTaskMsg. It loops internally so that non-task output (e.g. the
-// FLUSH-only "\x1b[2K\r" line the callback writes before every task, or the
-// play-start "▶ Play Name\n" line) never causes an early return of an empty
-// message.
+// readTaskCmd returns a tea.Cmd that blocks reading JSON lines from the
+// ansible.posix.jsonl stdout stream until it gets an actionable event:
 //
-// An empty ansibleTaskMsg is only returned when r reaches EOF (the process
-// has exited and the pipe is closed), which signals the Update handler to
-// stop re-queuing this command.
+//   - v2_playbook_on_task_start / v2_runner_on_start → ansibleTaskMsg(name)
+//   - v2_runner_on_ok with vsh_stdout → ansibleOutputMsg(content)
+//   - EOF / pipe closed → ansibleTaskMsg("") to stop re-queuing
+//
+// All other events (play_start, skipped, stats, etc.) are consumed silently.
+// Reads byte-by-byte so no bytes are lost between successive goroutine calls.
 func readTaskCmd(r io.Reader) tea.Cmd {
 	if r == nil {
 		return nil
 	}
 	return func() tea.Msg {
-		buf := make([]byte, 4096)
+		var line []byte
+		oneByte := make([]byte, 1)
 		for {
-			n, err := r.Read(buf)
+			n, err := r.Read(oneByte)
 			if n > 0 {
-				name := parseAnsibleTaskLine(buf[:n])
-				if name != "" {
-					// Got a real task name — deliver it.
-					return ansibleTaskMsg(name)
+				if oneByte[0] == '\n' {
+					if msg := parseJSONEvent(line); msg != nil {
+						return msg
+					}
+					line = line[:0]
+				} else {
+					line = append(line, oneByte[0])
 				}
-				// Got data but no task name (FLUSH-only line, play-start line,
-				// etc.) — keep reading rather than delivering an empty message
-				// that would be mistaken for EOF.
 			}
 			if err != nil {
-				// io.EOF or pipe closed: process has exited.
 				return ansibleTaskMsg("")
 			}
 		}
 	}
 }
 
-// spinnerRunes is the set of Unicode braille characters the Ansible callback
-// plugin cycles through as its spinner animation. Only lines whose first rune
-// is one of these are treated as task-name lines.
-var spinnerRunes = map[rune]bool{
-	'⠋': true, '⠙': true, '⠹': true, '⠸': true, '⠼': true,
-	'⠴': true, '⠦': true, '⠧': true, '⠇': true, '⠏': true,
+// ansibleJSONEvent is the minimal schema for ansible.posix.jsonl output lines.
+// Each line is a complete JSON object with an _event field that identifies the
+// Ansible callback hook that fired.
+type ansibleJSONEvent struct {
+	Event string `json:"_event"`
+	Task  struct {
+		Name string `json:"name"`
+	} `json:"task"`
+	// Hosts maps hostname → task result. We only need vsh_stdout from localhost.
+	Hosts map[string]struct {
+		VshStdout string `json:"vsh_stdout"`
+	} `json:"hosts"`
 }
 
-// parseAnsibleTaskLine strips ANSI escape codes from raw bytes, splits on \r,
-// and returns the task name from the last non-empty segment that begins with a
-// known spinner character.
-//
-// The callback writes per task: "\x1b[2K\r\033[0;32m⠙\033[0;0m taskname\r"
-// After stripping ANSI: "⠙ taskname"
-// After trimming spinner + space: "taskname"
-//
-// Lines that do not start with a spinner rune (e.g. the play-start line
-// "▶ Play Name\n" or the FLUSH-only "\r" prefix) are skipped, so they never
-// produce a false task name.
-func parseAnsibleTaskLine(raw []byte) string {
-	// Strip ANSI escape sequences.
-	clean := ansiEscape.ReplaceAllString(string(raw), "")
-	// Split on \r — each segment is one overwritten line.
-	parts := strings.Split(clean, "\r")
-	// Walk backwards to find the last segment that looks like a task line.
-	for i := len(parts) - 1; i >= 0; i-- {
-		seg := strings.TrimSpace(parts[i])
-		if seg == "" {
-			continue
-		}
-		runes := []rune(seg)
-		// Must start with a known spinner rune followed by a space and the task name.
-		if len(runes) > 2 && spinnerRunes[runes[0]] && runes[1] == ' ' {
-			return strings.TrimSpace(string(runes[2:]))
-		}
-		// Not a task line (play-start, FLUSH remnant, etc.) — keep looking.
+// parseJSONEvent parses a single jsonl line and returns an ansibleTaskMsg or
+// ansibleOutputMsg for events we care about, or nil for everything else.
+func parseJSONEvent(line []byte) tea.Msg {
+	if len(line) == 0 || line[0] != '{' {
+		return nil
 	}
-	return ""
+	var ev ansibleJSONEvent
+	if err := json.Unmarshal(line, &ev); err != nil {
+		return nil
+	}
+	switch ev.Event {
+	case "v2_playbook_on_task_start", "v2_runner_on_start":
+		name := strings.TrimSpace(ev.Task.Name)
+		if name != "" {
+			return ansibleTaskMsg(shortTaskName(name))
+		}
+	case "v2_runner_on_ok":
+		for _, result := range ev.Hosts {
+			if result.VshStdout != "" {
+				return ansibleOutputMsg(result.VshStdout)
+			}
+		}
+	}
+	return nil
 }
 
 // parseLogTaskName extracts the task name from a log line like:

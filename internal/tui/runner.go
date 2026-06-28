@@ -16,12 +16,12 @@ package tui
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
 	"strings"
-	"unicode/utf8"
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/x/term"
@@ -38,9 +38,10 @@ import (
 // Ansible's own vars_prompt handles the become-password prompt natively:
 // stdin is connected to the subprocess so the user types directly into
 // Ansible's prompt on the raw terminal. BubbleTea only takes over after
-// waitForFirstTask() detects the first Braille spinner character from the
-// callback plugin, which is only emitted once tasks start — guaranteeing
-// that vars_prompt has completed and stdin is free.
+// waitForFirstJSONTask() detects the first task-start JSON event from
+// ansible.posix.jsonl — which fires only after vars_prompt has completed
+// and tasks have begun — guaranteeing stdin is free before BubbleTea
+// takes ownership.
 //
 // When stdout is not a TTY (CI, pipes), it falls back to the normal
 // cobra/ansible path so non-interactive usage is never affected.
@@ -65,55 +66,37 @@ func RunWithPanel(root *cobra.Command, args []string, version string) error {
 		return fmt.Errorf("starting ansible-playbook: %w", err)
 	}
 
-	// Gate BubbleTea startup on the first Braille spinner character in
-	// Ansible's stdout. This ensures vars_prompt (the sudo password prompt)
-	// has completed before BubbleTea takes over the terminal and stdin.
-	//
-	// All bytes consumed while waiting are buffered and prepended back onto
-	// the reader so the exec panel receives the complete stdout stream.
-	taskOut := waitForFirstTask(ansibleOut)
-
-	// Wrap the stdout reader with a captureReader that intercepts \n-terminated
-	// segments (vsh_stdout table output, db listings, etc.) while passing all
-	// bytes through unchanged to the exec panel's task-name parser.
-	// The captured content is printed to the terminal after the exec panel exits.
-	cr := newCaptureReader(taskOut)
+	// Gate BubbleTea startup on the first task-start JSON event from
+	// ansible.posix.jsonl. The jsonl callback emits play_start events
+	// before vars_prompt fires; task-start events only appear after
+	// vars_prompt has completed. All JSON lines consumed while waiting
+	// are buffered and replayed so readTaskCmd() receives the full stream.
+	taskOut := waitForFirstJSONTask(ansibleOut)
 
 	commandStr := strings.Join(args, " ")
-	err = runExecPanel(commandStr, version, proc, cr, cleanup, 0)
-
-	// Print any captured vsh_stdout output (service tables, db listings, etc.)
-	// now that BubbleTea has exited and the terminal is fully restored.
-	if output := cr.Output(); len(output) > 0 {
-		fmt.Fprint(os.Stdout, cleanControlCodes(output))
-	}
-
-	return err
+	return runExecPanel(commandStr, version, proc, taskOut, cleanup, 0)
 }
 
-// waitForFirstTask reads from the ansible stdout pipe byte-by-byte, buffering
-// everything, until it detects the two-byte UTF-8 prefix of a Braille spinner
-// character (\xe2\xa0). It then returns an io.Reader that replays all consumed
-// bytes followed by the rest of the original reader.
+// waitForFirstJSONTask reads ansible.posix.jsonl output line-by-line,
+// buffering everything, until it finds a v2_playbook_on_task_start or
+// v2_runner_on_start event. It then returns an io.Reader that replays
+// all consumed bytes (including the task-start line) followed by the
+// rest of the original reader.
 //
-// The valet-sh callback plugin writes to stdout in this order:
+// ansible.posix.jsonl emits events in this order per play:
 //
-//  1. \033[?25h (CURSOR_SHOW) — at module import, first byte 0x1B
-//  2. "▶ play-name\n" — at play start (before vars_prompt); '▶' is \xe2\x96\xb6
-//  3. vars_prompt fires here — Ansible reads the password from os.Stdin
-//  4. "\x1b[2K\r\033[0;32m⠙\033[0;0m taskname\r" — at each task start
+//  1. v2_playbook_on_play_start → fires BEFORE vars_prompt
+//  2. vars_prompt fires here    → Ansible reads password from stdin
+//  3. v2_playbook_on_task_start → fires for each task AFTER vars_prompt
 //
-// All Braille spinner characters (U+2800..U+28FF) encode as \xe2\xa0\x?? in
-// UTF-8. The play-start '▶' (U+25B6) encodes as \xe2\x96\xb6. Checking the
-// two-byte prefix \xe2\xa0 uniquely identifies a spinner character without
-// false-matching the play-start line or any ANSI escape sequence.
+// Gating on the task-start event (step 3) ensures vars_prompt (step 2)
+// has completed and stdin is free before BubbleTea takes over.
 //
-// If the pipe closes before any task starts (e.g. playbook syntax error or
-// early exit), the buffered bytes are returned as-is so the exec panel can
-// still show the error state.
-func waitForFirstTask(r io.Reader) io.Reader {
+// If the pipe closes before any task starts (e.g. playbook syntax error),
+// the buffered bytes are returned as-is so the exec panel shows the error.
+func waitForFirstJSONTask(r io.Reader) io.Reader {
 	var buf bytes.Buffer
-	prev := byte(0)
+	var line []byte
 	oneByte := make([]byte, 1)
 
 	for {
@@ -121,21 +104,17 @@ func waitForFirstTask(r io.Reader) io.Reader {
 		if n > 0 {
 			b := oneByte[0]
 			buf.WriteByte(b)
-
-			// Braille spinner prefix: two consecutive bytes 0xE2 0xA0.
-			// Read the completing third byte of the rune before breaking so the
-			// exec model receives a valid UTF-8 sequence from the reader.
-			if prev == 0xE2 && b == 0xA0 {
-				n2, _ := r.Read(oneByte)
-				if n2 > 0 {
-					buf.WriteByte(oneByte[0])
+			if b == '\n' {
+				if isJSONTaskStart(line) {
+					break
 				}
-				break
+				line = line[:0]
+			} else {
+				line = append(line, b)
 			}
-			prev = b
 		}
 		if err != nil {
-			// Pipe closed (process exited before any task).
+			// Pipe closed before any task — return what we have.
 			break
 		}
 	}
@@ -143,137 +122,25 @@ func waitForFirstTask(r io.Reader) io.Reader {
 	return io.MultiReader(&buf, r)
 }
 
-// captureReader wraps an io.Reader and intercepts the Ansible callback
-// plugin's stdout stream to capture vsh_stdout content (service tables,
-// db listings, etc.) while passing all bytes through unchanged to the
-// exec panel's task-name parser.
-//
-// The callback plugin writes two categories of content to stdout:
-//
-//   - \r-terminated: spinner updates and FLUSH prefixes — task progress only.
-//     These are consumed by readTaskCmd() for task-name display and discarded.
-//
-//   - \n-terminated: actual output (vsh_stdout), play-start decorators, and
-//     stats (✔ done / ✘ failed). Only the actual output is captured; the
-//     decorators and stats are filtered out because the exec panel handles
-//     those itself.
-//
-// Filtering rule (applied after stripping ANSI escape codes):
-//
-//   - empty segment → discard
-//   - starts with '▶' (play-start) → discard
-//   - starts with '✔' (stats success) → discard
-//   - starts with '✘' or 'ℹ' (stats failure / info) → discard
-//   - starts with a Braille char (U+2800..U+28FF, spinner) → discard
-//   - anything else → CAPTURE (vsh_stdout table content)
-//
-// All bytes are passed through Read() unchanged so readTaskCmd() continues
-// to work normally. The captured content is retrieved after the exec panel
-// exits via Output().
-type captureReader struct {
-	r       io.Reader
-	pending []byte // accumulates the current incomplete line
-	output  []byte // captured vsh_stdout segments (raw, with ANSI colors)
-}
-
-func newCaptureReader(r io.Reader) *captureReader {
-	return &captureReader{r: r}
-}
-
-// Read passes bytes through to the caller and processes them for capture.
-func (cr *captureReader) Read(p []byte) (int, error) {
-	n, err := cr.r.Read(p)
-	if n > 0 {
-		cr.process(p[:n])
-	}
-	return n, err
-}
-
-// process classifies each byte and accumulates complete \n-terminated segments
-// for capture evaluation.
-func (cr *captureReader) process(b []byte) {
-	for _, c := range b {
-		switch c {
-		case '\r':
-			// Spinner / FLUSH overwrite line — discard accumulated pending bytes.
-			cr.pending = cr.pending[:0]
-		case '\n':
-			// Complete \n-terminated segment — evaluate for capture.
-			if cr.shouldCapture(cr.pending) {
-				cr.output = append(cr.output, cr.pending...)
-				cr.output = append(cr.output, '\n')
-			}
-			cr.pending = cr.pending[:0]
-		default:
-			cr.pending = append(cr.pending, c)
-		}
-	}
-}
-
-// shouldCapture returns true when a raw (ANSI-colored) line segment contains
-// actual vsh_stdout content that the user should see printed after the exec panel.
-func (cr *captureReader) shouldCapture(raw []byte) bool {
-	if len(raw) == 0 {
+// isJSONTaskStart returns true when line is a jsonl task-start event.
+// Uses a fast bytes.Contains pre-check before JSON parsing to avoid
+// allocating for every non-task line.
+func isJSONTaskStart(line []byte) bool {
+	if !bytes.Contains(line, []byte("v2_playbook_on_task_start")) &&
+		!bytes.Contains(line, []byte("v2_runner_on_start")) {
 		return false
 	}
-
-	// Strip ANSI escape sequences to classify the content.
-	stripped := strings.TrimSpace(ansiEscape.ReplaceAllString(string(raw), ""))
-	if stripped == "" {
-		return false
+	var ev struct {
+		Event string `json:"_event"`
 	}
-
-	// Decode the first rune for classification.
-	first, _ := utf8.DecodeRuneInString(stripped)
-	if first == utf8.RuneError {
-		return false
-	}
-
-	switch {
-	case first == '▶':
-		// play-start line ("▶ play-name") — decorative, discard.
-		return false
-	case first == '✔':
-		// stats success ("✔ done") — exec panel handles this, discard.
-		return false
-	case first == '✘' || first == 'ℹ':
-		// stats failure / info — exec panel handles errors, discard.
-		return false
-	case first >= 0x2800 && first <= 0x28FF:
-		// Braille spinner character — task name line, discard.
-		return false
-	}
-
-	// Everything else is vsh_stdout content (tables, listings, etc.).
-	return true
-}
-
-// Output returns all captured vsh_stdout content accumulated so far.
-// Safe to call after the exec panel exits (all stdout has been consumed).
-func (cr *captureReader) Output() []byte {
-	return cr.output
-}
-
-// cleanControlCodes removes terminal-control ANSI sequences that are harmless
-// during playbook execution but would corrupt the terminal display when printed
-// after the exec panel has already exited and restored the terminal:
-//
-//   - \x1b[2K  — FLUSH (erase current line): would clear the exec panel's last line
-//   - \x1b[?25h — CURSOR_SHOW: cursor is already visible, no-op but noisy
-//   - \x1b[?25l — CURSOR_HIDE: would hide the cursor unexpectedly
-//
-// SGR color codes (\x1b[...m) are preserved so tables render with their
-// original colors in the user's terminal.
-func cleanControlCodes(b []byte) string {
-	s := string(b)
-	s = strings.ReplaceAll(s, "\x1b[2K", "")
-	s = strings.ReplaceAll(s, "\x1b[?25h", "")
-	s = strings.ReplaceAll(s, "\x1b[?25l", "")
-	return s
+	return json.Unmarshal(line, &ev) == nil &&
+		(ev.Event == "v2_playbook_on_task_start" || ev.Event == "v2_runner_on_start")
 }
 
 // runExecPanel starts a standalone Bubble Tea program showing the execution
 // panel for the given proc. Called for direct CLI invocations (no sidebar).
+// After the panel exits, any vsh_stdout output captured during the run
+// (service tables, db listings, etc.) is printed to the terminal.
 func runExecPanel(command, version string, proc *exec.Cmd, ansibleOut io.Reader, cleanup func(), totalTasks int) error {
 	// Get terminal size with fallback to 80x24.
 	width, height := 80, 24
@@ -292,6 +159,11 @@ func runExecPanel(command, version string, proc *exec.Cmd, ansibleOut io.Reader,
 	}
 
 	if fm, ok := final.(standaloneExecModel); ok {
+		// Print any vsh_stdout content (tables, listings) now that BubbleTea
+		// has exited and the terminal is fully restored.
+		if output := fm.execPanel.CapturedOutput(); output != "" {
+			fmt.Println(output)
+		}
 		return fm.execPanel.Err()
 	}
 	return nil
