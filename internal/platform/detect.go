@@ -92,14 +92,36 @@ func AnsiblePlaybookBin() string {
 	return "ansible-playbook"
 }
 
+// repoDirDefault is the production install path of the valet-sh Ansible repo.
+const repoDirDefault = "/usr/local/valet-sh/valet-sh"
+
+// RepoDirEnvVar is the environment variable that overrides the Ansible repo
+// path. Set it to the absolute path of your valet-sh checkout to run the
+// development binary against local playbooks and config without installing:
+//
+//	export VALET_REPO_DIR=/home/user/workspace/valet-sh
+//	./dist/valet service list
+const RepoDirEnvVar = "VALET_REPO_DIR"
+
 // PlaybookDir returns the absolute path to the valet-sh playbooks directory.
 func PlaybookDir() string {
-	return "/usr/local/valet-sh/valet-sh/playbooks"
+	return RepoDir() + "/playbooks"
 }
 
-// RepoDir returns the root of the installed valet-sh Ansible repo.
+// RepoDir returns the root of the valet-sh Ansible repo.
+// When VALET_REPO_DIR is set it overrides the default installed path, allowing
+// the development binary to run against a local checkout without installing.
 func RepoDir() string {
-	return "/usr/local/valet-sh/valet-sh"
+	if dir := os.Getenv(RepoDirEnvVar); dir != "" {
+		return dir
+	}
+	return repoDirDefault
+}
+
+// DevRepoDir returns the VALET_REPO_DIR override if set, or empty string.
+// Used to display a developer notice when running with a custom repo path.
+func DevRepoDir() string {
+	return os.Getenv(RepoDirEnvVar)
 }
 
 func isExecutable(path string) bool {
