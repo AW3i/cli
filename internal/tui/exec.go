@@ -16,6 +16,7 @@ package tui
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -86,11 +87,6 @@ type logViewReadyMsg struct{ lines []string }
 // from v2_playbook_on_task_start / v2_runner_on_start events.
 type ansibleTaskMsg string
 
-// ansibleOutputMsg carries vsh_stdout content (tables, listings) extracted
-// from v2_runner_on_ok events. Accumulated in capturedOutput and printed
-// to the terminal after the exec panel exits.
-type ansibleOutputMsg string
-
 // ExecModel is a Bubble Tea model that shows a scrollable live log panel
 // while an ansible-playbook subprocess is running. On failure it offers
 // to open a full-screen log viewer.
@@ -115,9 +111,18 @@ type ExecModel struct {
 	cleanup func()
 
 	// ansibleOut is the reader connected to ansible-playbook's stdout pipe.
-	// The callback plugin writes "⠙ taskname\r" lines here for each task start.
-	// readTaskCmd reads one such segment and sends it as ansibleTaskMsg.
+	// ansible.posix.jsonl writes one JSON line per event; readTaskCmd reads
+	// task names from v2_playbook_on_task_start events and writes vsh_stdout
+	// content directly to output (bypassing the BubbleTea message queue).
 	ansibleOut io.Reader
+
+	// output is a shared buffer for vsh_stdout content (tables, listings)
+	// extracted from v2_runner_on_ok JSON events. Written by the readTaskCmd
+	// goroutine directly — bypassing the BubbleTea message queue so that
+	// tea.Quit cannot race ahead of ansibleOutputMsg delivery. The pointer
+	// is shared across all value-copies of ExecModel (Elm architecture).
+	// Read by runExecPanel() after p.Run() returns.
+	output *bytes.Buffer
 
 	// logFilePath is the path to the debug.log file.
 	logFilePath string
@@ -171,11 +176,6 @@ type ExecModel struct {
 	// logViewOpen is true once the user has said Y and the log viewer is active.
 	logViewOpen bool
 
-	// capturedOutput accumulates vsh_stdout content from ansibleOutputMsg events
-	// (tables, db listings, etc.). Printed to the terminal after the exec panel
-	// exits via CapturedOutput().
-	capturedOutput []string
-
 	// width/height of the available area.
 	width  int
 	height int
@@ -192,7 +192,11 @@ type ExecModel struct {
 // the file before the subprocess starts, we end up with a handle to the
 // now-rotated debug.log.1, missing all new output. Instead, we open the file
 // lazily in readNewLogLines() after the rotation has already occurred.
-func NewExecModel(command, version string, withSidebar bool, proc *exec.Cmd, ansibleOut io.Reader, cleanup func(), totalTasks, width, height int) ExecModel {
+// NewExecModel creates a new ExecModel ready to run.
+// output is a shared *bytes.Buffer that readTaskCmd writes vsh_stdout content
+// to directly (bypassing the BubbleTea message queue). The caller reads from
+// it after p.Run() returns to print tables/listings to the terminal.
+func NewExecModel(command, version string, withSidebar bool, proc *exec.Cmd, ansibleOut io.Reader, output *bytes.Buffer, cleanup func(), totalTasks, width, height int) ExecModel {
 	viewport := viewport.New(viewport.WithWidth(width), viewport.WithHeight(execViewportHeight(height, false)))
 	viewport.SetContent("")
 
@@ -202,6 +206,7 @@ func NewExecModel(command, version string, withSidebar bool, proc *exec.Cmd, ans
 		withSidebar: withSidebar,
 		proc:        proc,
 		ansibleOut:  ansibleOut,
+		output:      output,
 		cleanup:     cleanup,
 		viewport:    viewport,
 		totalTasks:  totalTasks,
@@ -231,7 +236,7 @@ func (e ExecModel) Init() tea.Cmd {
 	return tea.Batch(
 		firstTickCmd(), // 300ms delay for first read (after Ansible rotates)
 		waitForProcess(e.proc),
-		readTaskCmd(e.ansibleOut), // stream task names from ansible stdout
+		readTaskCmd(e.ansibleOut, e.output), // stream task names from ansible stdout
 	)
 }
 
@@ -244,17 +249,9 @@ func (e ExecModel) Update(msg tea.Msg) (ExecModel, tea.Cmd) {
 			e.currentTask = string(msg)
 			// Queue the next read only when we got real data.
 			// Empty msg means EOF (process exited) — stop re-queuing.
-			return e, readTaskCmd(e.ansibleOut)
+			return e, readTaskCmd(e.ansibleOut, e.output)
 		}
 		return e, nil
-
-	case ansibleOutputMsg:
-		// vsh_stdout content (tables, listings) from a runner_on_ok event.
-		// Accumulate for printing after the exec panel exits.
-		if string(msg) != "" {
-			e.capturedOutput = append(e.capturedOutput, string(msg))
-		}
-		return e, readTaskCmd(e.ansibleOut)
 
 	case execTickMsg:
 		lines := e.readNewLogLines()
@@ -594,13 +591,6 @@ func (e ExecModel) IsDone() bool { return e.done }
 // Err returns the subprocess exit error, if any.
 func (e ExecModel) Err() error { return e.err }
 
-// CapturedOutput returns all vsh_stdout content accumulated during the run,
-// joined with newlines. Empty string means no output was captured.
-// Called after the exec panel exits to print tables/listings to the terminal.
-func (e ExecModel) CapturedOutput() string {
-	return strings.Join(e.capturedOutput, "\n")
-}
-
 // copyToClipboardOSC52 copies the given text to the system clipboard using the
 // OSC 52 escape sequence. This works in modern terminals like iTerm2, Kitty,
 // WezTerm, Alacritty, and tmux (with set-clipboard on). If the terminal doesn't
@@ -747,15 +737,20 @@ func waitForProcess(cmd *exec.Cmd) tea.Cmd {
 }
 
 // readTaskCmd returns a tea.Cmd that blocks reading JSON lines from the
-// ansible.posix.jsonl stdout stream until it gets an actionable event:
+// ansible.posix.jsonl stdout stream until it gets a task-name event:
 //
 //   - v2_playbook_on_task_start / v2_runner_on_start → ansibleTaskMsg(name)
-//   - v2_runner_on_ok with vsh_stdout → ansibleOutputMsg(content)
+//   - v2_runner_on_ok with vsh_stdout → written directly to out (no BubbleTea msg)
 //   - EOF / pipe closed → ansibleTaskMsg("") to stop re-queuing
+//
+// vsh_stdout is written to the shared buffer directly rather than going
+// through the BubbleTea message queue. This avoids a race where tea.Quit
+// (sent on success in CLI mode) can arrive before the ansibleOutputMsg is
+// processed, silently dropping the captured table content.
 //
 // All other events (play_start, skipped, stats, etc.) are consumed silently.
 // Reads byte-by-byte so no bytes are lost between successive goroutine calls.
-func readTaskCmd(r io.Reader) tea.Cmd {
+func readTaskCmd(r io.Reader, out *bytes.Buffer) tea.Cmd {
 	if r == nil {
 		return nil
 	}
@@ -766,7 +761,7 @@ func readTaskCmd(r io.Reader) tea.Cmd {
 			n, err := r.Read(oneByte)
 			if n > 0 {
 				if oneByte[0] == '\n' {
-					if msg := parseJSONEvent(line); msg != nil {
+					if msg := parseJSONEvent(line, out); msg != nil {
 						return msg
 					}
 					line = line[:0]
@@ -795,9 +790,11 @@ type ansibleJSONEvent struct {
 	} `json:"hosts"`
 }
 
-// parseJSONEvent parses a single jsonl line and returns an ansibleTaskMsg or
-// ansibleOutputMsg for events we care about, or nil for everything else.
-func parseJSONEvent(line []byte) tea.Msg {
+// parseJSONEvent parses a single jsonl line. For task-start events it returns
+// an ansibleTaskMsg. For v2_runner_on_ok events with vsh_stdout it writes the
+// content directly to out and returns nil (continues reading without a BubbleTea
+// round-trip). Returns nil for all other events or on parse errors.
+func parseJSONEvent(line []byte, out *bytes.Buffer) tea.Msg {
 	if len(line) == 0 || line[0] != '{' {
 		return nil
 	}
@@ -812,9 +809,14 @@ func parseJSONEvent(line []byte) tea.Msg {
 			return ansibleTaskMsg(shortTaskName(name))
 		}
 	case "v2_runner_on_ok":
-		for _, result := range ev.Hosts {
-			if result.VshStdout != "" {
-				return ansibleOutputMsg(result.VshStdout)
+		if out != nil {
+			for _, result := range ev.Hosts {
+				if result.VshStdout != "" {
+					if out.Len() > 0 {
+						out.WriteByte('\n')
+					}
+					out.WriteString(result.VshStdout)
+				}
 			}
 		}
 	}

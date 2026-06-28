@@ -15,6 +15,7 @@
 package tui
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"io"
@@ -27,7 +28,7 @@ import (
 )
 
 func TestExecModelInit(t *testing.T) {
-	m := NewExecModel("service start php83", "1.0.0", false, nil, nil, nil, 0, 80, 24)
+	m := NewExecModel("service start php83", "1.0.0", false, nil, nil, nil, nil, 0, 80, 24)
 	cmd := m.Init()
 	if cmd == nil {
 		t.Error("Init() should return a non-nil Cmd (tick + wait)")
@@ -35,7 +36,7 @@ func TestExecModelInit(t *testing.T) {
 }
 
 func TestExecModelDoneOnExecDoneMsg(t *testing.T) {
-	m := NewExecModel("install", "1.0.0", false, nil, nil, nil, 0, 80, 24)
+	m := NewExecModel("install", "1.0.0", false, nil, nil, nil, nil, 0, 80, 24)
 
 	rm, _ := m.Update(execDoneMsg{err: nil})
 
@@ -52,7 +53,7 @@ func TestExecModelDoneOnExecDoneMsg(t *testing.T) {
 }
 
 func TestExecModelFailedExecDoneMsg(t *testing.T) {
-	m := NewExecModel("service start php83", "1.0.0", false, nil, nil, nil, 0, 80, 24)
+	m := NewExecModel("service start php83", "1.0.0", false, nil, nil, nil, nil, 0, 80, 24)
 	sentinel := errors.New("exit status 1")
 
 	rm, _ := m.Update(execDoneMsg{err: sentinel})
@@ -70,7 +71,7 @@ func TestExecModelFailedExecDoneMsg(t *testing.T) {
 }
 
 func TestExecModelLogPromptYesOpensViewer(t *testing.T) {
-	m := NewExecModel("install", "1.0.0", false, nil, nil, nil, 0, 80, 24)
+	m := NewExecModel("install", "1.0.0", false, nil, nil, nil, nil, 0, 80, 24)
 
 	// Trigger failure.
 	m, _ = m.Update(execDoneMsg{err: errors.New("exit status 1")})
@@ -92,7 +93,7 @@ func TestExecModelLogPromptYesOpensViewer(t *testing.T) {
 }
 
 func TestExecModelLogPromptEnterOpensViewer(t *testing.T) {
-	m := NewExecModel("install", "1.0.0", false, nil, nil, nil, 0, 80, 24)
+	m := NewExecModel("install", "1.0.0", false, nil, nil, nil, nil, 0, 80, 24)
 	m, _ = m.Update(execDoneMsg{err: errors.New("exit status 1")})
 
 	// Any other key triggers the prompt; then Enter confirms.
@@ -110,7 +111,7 @@ func TestExecModelLogPromptEnterOpensViewer(t *testing.T) {
 }
 
 func TestExecModelLogPromptNoQuits(t *testing.T) {
-	m := NewExecModel("install", "1.0.0", false, nil, nil, nil, 0, 80, 24)
+	m := NewExecModel("install", "1.0.0", false, nil, nil, nil, nil, 0, 80, 24)
 	m, _ = m.Update(execDoneMsg{err: errors.New("exit status 1")})
 
 	// Show prompt with any neutral key, then press N.
@@ -125,7 +126,7 @@ func TestExecModelLogPromptNoQuits(t *testing.T) {
 }
 
 func TestExecModelLogPromptEscQuits(t *testing.T) {
-	m := NewExecModel("install", "1.0.0", false, nil, nil, nil, 0, 80, 24)
+	m := NewExecModel("install", "1.0.0", false, nil, nil, nil, nil, 0, 80, 24)
 	m, _ = m.Update(execDoneMsg{err: errors.New("exit status 1")})
 
 	_, cmd := m.Update(tea.KeyPressMsg{Text: "esc"})
@@ -156,7 +157,7 @@ func TestExecModelLogViewerViewportHeight(t *testing.T) {
 }
 
 func TestExecModelTaskCounting(t *testing.T) {
-	m := NewExecModel("install", "1.0.0", false, nil, nil, nil, 10, 80, 24)
+	m := NewExecModel("install", "1.0.0", false, nil, nil, nil, nil, 10, 80, 24)
 
 	// Simulate task lines appearing in the log.
 	m.appendLine("TASK [Gathering Facts]")
@@ -244,7 +245,7 @@ func TestExecModelProgressBarRendering(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			m := NewExecModel("install", "1.0.0", false, nil, nil, nil, tc.totalTasks, 80, 24)
+			m := NewExecModel("install", "1.0.0", false, nil, nil, nil, nil, tc.totalTasks, 80, 24)
 			m.tasksDone = tc.tasksDone
 			m.done = tc.done
 			m.err = tc.err
@@ -275,7 +276,7 @@ func TestExecModelRenderProgressBarCalculations(t *testing.T) {
 
 	for _, tc := range tasks {
 		t.Run(fmt.Sprintf("%d_of_%d", tc.tasksDone, tc.totalTasks), func(t *testing.T) {
-			m := NewExecModel("install", "1.0.0", false, nil, nil, nil, tc.totalTasks, 80, 24)
+			m := NewExecModel("install", "1.0.0", false, nil, nil, nil, nil, tc.totalTasks, 80, 24)
 			m.tasksDone = tc.tasksDone
 			m.currentTask = tc.task
 
@@ -290,7 +291,7 @@ func TestExecModelRenderProgressBarCalculations(t *testing.T) {
 
 func TestExecModelProgressBarView(t *testing.T) {
 	// While running: should show spinner + task name (shortened).
-	m := NewExecModel("install", "1.0.0", false, nil, nil, nil, 20, 80, 24)
+	m := NewExecModel("install", "1.0.0", false, nil, nil, nil, nil, 20, 80, 24)
 	m.tasksDone = 10
 	m.currentTask = "some : task name"
 
@@ -389,7 +390,8 @@ func TestParseJSONEvent(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			msg := parseJSONEvent([]byte(tc.line))
+			var buf bytes.Buffer
+			msg := parseJSONEvent([]byte(tc.line), &buf)
 			switch tc.wantType {
 			case "task":
 				tm, ok := msg.(ansibleTaskMsg)
@@ -400,16 +402,19 @@ func TestParseJSONEvent(t *testing.T) {
 					t.Errorf("task name: got %q, want %q", string(tm), tc.wantVal)
 				}
 			case "output":
-				om, ok := msg.(ansibleOutputMsg)
-				if !ok {
-					t.Fatalf("expected ansibleOutputMsg, got %T", msg)
+				// vsh_stdout is written directly to the buffer, not returned as a msg.
+				if msg != nil {
+					t.Errorf("vsh_stdout should not produce a msg (got %T), only write to buffer", msg)
 				}
-				if string(om) != tc.wantVal {
-					t.Errorf("output: got %q, want %q", string(om), tc.wantVal)
+				if buf.String() != tc.wantVal {
+					t.Errorf("output buffer: got %q, want %q", buf.String(), tc.wantVal)
 				}
 			case "nil":
 				if msg != nil {
 					t.Errorf("expected nil, got %T: %v", msg, msg)
+				}
+				if buf.Len() != 0 {
+					t.Errorf("expected empty buffer, got %q", buf.String())
 				}
 			}
 		})
@@ -488,7 +493,7 @@ func TestReadTaskCmdParsesJSONTaskStart(t *testing.T) {
 		pw.Close()
 	}()
 
-	msg := readTaskCmd(pr)()
+	msg := readTaskCmd(pr, nil)()
 
 	tm, ok := msg.(ansibleTaskMsg)
 	if !ok {
@@ -499,24 +504,34 @@ func TestReadTaskCmdParsesJSONTaskStart(t *testing.T) {
 	}
 }
 
-func TestReadTaskCmdReturnsOutputMsg(t *testing.T) {
-	// Simulate a pipe that sends a runner_on_ok with vsh_stdout.
+func TestReadTaskCmdWritesVshStdoutToBuffer(t *testing.T) {
+	// vsh_stdout content must be written directly to the shared buffer,
+	// not returned as a BubbleTea message (to avoid the tea.Quit race).
 	line := `{"_event":"v2_runner_on_ok","task":{"name":"list services"},"hosts":{"localhost":{"vsh_stdout":"table content"}},"_timestamp":"t"}` + "\n"
+	taskLine := `{"_event":"v2_playbook_on_task_start","task":{"name":"done"},"_timestamp":"t"}` + "\n"
 
 	pr, pw := io.Pipe()
 	go func() {
 		pw.Write([]byte(line))
+		pw.Write([]byte(taskLine))
 		pw.Close()
 	}()
 
-	msg := readTaskCmd(pr)()
+	var buf bytes.Buffer
+	// First call: vsh_stdout is written to buf, readTaskCmd keeps looping until task name.
+	msg := readTaskCmd(pr, &buf)()
 
-	om, ok := msg.(ansibleOutputMsg)
+	// The vsh_stdout line should NOT produce a message — readTaskCmd continues.
+	// The task name line produces the message.
+	tm, ok := msg.(ansibleTaskMsg)
 	if !ok {
-		t.Fatalf("expected ansibleOutputMsg, got %T", msg)
+		t.Fatalf("expected ansibleTaskMsg after vsh_stdout, got %T", msg)
 	}
-	if string(om) != "table content" {
-		t.Errorf("expected %q, got %q", "table content", string(om))
+	if string(tm) != "done" {
+		t.Errorf("expected task name %q, got %q", "done", string(tm))
+	}
+	if buf.String() != "table content" {
+		t.Errorf("expected buffer %q, got %q", "table content", buf.String())
 	}
 }
 
@@ -635,7 +650,7 @@ func TestShortTaskName(t *testing.T) {
 
 func TestAppendLinesSkipsMetaTasks(t *testing.T) {
 	// Test that include_tasks doesn't update currentTask if a real task came before
-	m := NewExecModel("install", "1.0.0", false, nil, nil, nil, 10, 80, 24)
+	m := NewExecModel("install", "1.0.0", false, nil, nil, nil, nil, 10, 80, 24)
 
 	// First, set a real task
 	m.appendLine("TASK [some-role : ensure service is started] ****")
