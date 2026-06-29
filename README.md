@@ -70,24 +70,44 @@ No Go code needs to be written or modified.
 
 | File | Responsibility |
 |---|---|
-| `launcher.go` | Navigation-only model: command bar, inline box, quits with `Result.Args` on Enter |
-| `list.go` | `CommandItem` (list.Item), custom delegate, arg parsing from cobra `Use` |
+| `launcher.go` | Navigation + help system: command bar, inline box, help viewer, quits with `Result.Args` on Enter |
+| `list.go` | `CommandItem` (list.Item), custom delegate, arg parsing from cobra `Use`, keybinding hints |
 | `args.go` | Argument input pane (`bubbles/textinput` per arg) |
-| `exec.go` | `ExecModel`: live log panel, `debug.log` tail, log viewer on failure |
+| `exec.go` | `ExecModel`: live log panel, JSON event streaming, log viewer on failure |
 | `runner.go` | `RunWithPanel()` entry point, `waitForFirstTask()` gate, `standaloneExecModel` |
-| `inline.go` | Inline command box (arg input + docs display) |
+| `inline.go` | Inline command box (arg input + docs display, ctrl+d/u scrolling) |
 | `styles.go` | Lip Gloss styles matching the Ansible callback colour palette |
 
 **Screen state machine:**
 
 ```
 screenList    →  (enter on leaf)  →  screenInline
+             →  (? on leaf)       →  screenHelp
 screenInline  →  (enter)          →  [launcher quits, Result.Args set]
-                                      → main.go calls RunWithPanel
-                                          → waitForFirstTask() blocks
-                                          → BubbleTea exec panel starts
+             →  (?)              →  screenHelp
+screenHelp    →  (enter)          →  screenInline (run command)
+             →  (q/esc/?)        →  screenList (close help)
 screenExec    →  (done, failure)  →  logViewOpen = true
 ```
+
+**Interactive help system:**
+
+The TUI launcher includes an integrated help viewer accessible via the `?` key:
+
+| Screen | Key | Action |
+|---|---|---|
+| List | `?` | Open read-only help view for selected command |
+| Inline box | `?` | Close box and open help view for selected command |
+| Help view | `↑/↓` or `j/k` | Scroll help text up/down |
+| Help view | `enter` | Close help and open inline box (to run command) |
+| Help view | `q`/`esc`/`?` | Close help and return to list |
+
+Help text is sourced directly from the playbook's `@help:` annotation and includes:
+- Command usage (from `@usage:`)
+- Short description (from `@description:`)
+- Full multi-line help block (from `@help:`)
+
+The help view uses a fixed height (8 lines) to prevent viewport jumping when opened.
 
 **Two execution paths:**
 
