@@ -30,7 +30,6 @@ type screen int
 const (
 	screenList   screen = iota // navigating the horizontal command bar
 	screenInline               // inline box open (arg input + docs)
-	screenExec                 // ansible is running, exec panel shown
 )
 
 // stackEntry records a navigation level so we can Esc back.
@@ -66,9 +65,6 @@ type model struct {
 
 	// activeScreen controls which component receives keystrokes.
 	activeScreen screen
-
-	// execModel is the full-width execution panel shown during ansible runs.
-	execModel ExecModel
 
 	// totalTasks is the number of tasks that will be executed, determined by
 	// ansible-playbook --list-tasks before the run. Zero means unknown.
@@ -183,8 +179,8 @@ func (m model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m, tea.Quit
 	}
 
-	// ctrl+[ toggles vim mode from any screen except exec.
-	if key == "ctrl+[" && m.activeScreen != screenExec {
+	// ctrl+[ toggles vim mode.
+	if key == "ctrl+[" {
 		m.vimMode = !m.vimMode
 		return m, nil
 	}
@@ -195,11 +191,6 @@ func (m model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 
 	case screenInline:
 		return m.handleInlineKey(key, msg)
-
-	case screenExec:
-		var cmd tea.Cmd
-		m.execModel, cmd = m.execModel.Update(msg)
-		return m, cmd
 	}
 
 	return m, nil
@@ -357,8 +348,6 @@ func (m model) routeMsg(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.inlineBox = &updated
 			cmd = c
 		}
-	case screenExec:
-		m.execModel, cmd = m.execModel.Update(msg)
 	default:
 		m.commandList, cmd = m.commandList.Update(msg)
 		m.stack[len(m.stack)-1].list = m.commandList
@@ -370,10 +359,6 @@ func (m model) routeMsg(msg tea.Msg) (tea.Model, tea.Cmd) {
 func (m model) resizeAll() model {
 	m.commandList.SetSize(m.width, 10)
 	m.stack[len(m.stack)-1].list = m.commandList
-
-	if m.activeScreen == screenExec {
-		m.execModel = m.execModel.SetSize(m.width, m.height)
-	}
 
 	return m
 }
@@ -389,10 +374,6 @@ func (m model) View() tea.View {
 }
 
 func (m model) render() string {
-	if m.activeScreen == screenExec {
-		return m.execModel.View()
-	}
-
 	var output strings.Builder
 
 	_, _ = fmt.Fprintln(&output, m.headerView())

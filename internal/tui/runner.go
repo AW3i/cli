@@ -158,7 +158,7 @@ func runExecPanel(command, version string, proc *exec.Cmd, ansibleOut io.Reader,
 	var outputBuf bytes.Buffer
 
 	m := standaloneExecModel{
-		execPanel: NewExecModel(command, version, false, proc, ansibleOut, &outputBuf, cleanup, totalTasks, width, height),
+		execPanel: NewExecModel(command, version, proc, ansibleOut, &outputBuf, cleanup, totalTasks, width, height),
 	}
 
 	p := tea.NewProgram(m)
@@ -241,7 +241,11 @@ func (standalone standaloneExecModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 func (standalone standaloneExecModel) View() tea.View {
 	v := tea.NewView(standalone.execPanel.View())
-	v.MouseMode = tea.MouseModeCellMotion
+	// Enable mouse mode during execution (doesn't matter much, just a spinner).
+	// Disable it in the log viewer so users can select text with the mouse naturally.
+	if !standalone.execPanel.LogViewOpen() {
+		v.MouseMode = tea.MouseModeCellMotion
+	}
 	return v
 }
 

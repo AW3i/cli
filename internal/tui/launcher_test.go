@@ -128,17 +128,7 @@ func TestVimModeTogglesWithCtrlBracket(t *testing.T) {
 	}
 }
 
-func TestVimModeDoesNotToggleDuringExec(t *testing.T) {
-	root := testRoot()
-	m := newModel(root, "1.0.0", false)
-	m.activeScreen = screenExec
 
-	result, _ := m.Update(tea.KeyPressMsg{Text: "ctrl+["})
-	rm := result.(model)
-	if rm.vimMode {
-		t.Error("ctrl+[ should not toggle vim mode during exec screen")
-	}
-}
 
 // ---------------------------------------------------------------------------
 // Navigation
