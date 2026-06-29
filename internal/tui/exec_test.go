@@ -74,19 +74,16 @@ func TestExecModelLogPromptYesOpensViewer(t *testing.T) {
 	// Trigger failure.
 	m, _ = m.Update(execDoneMsg{err: errors.New("exit status 1")})
 
-	// Press Y directly — skips prompt and opens log immediately.
+	// Press Y directly — sets logViewRequested and quits.
 	m2, cmd := m.Update(tea.KeyPressMsg{Text: "y"})
 	if m2.awaitingLogPrompt {
 		t.Error("awaitingLogPrompt should not be set when Y pressed directly")
 	}
-	if cmd == nil {
-		t.Error("expected loadLogCmd to be returned after Y")
+	if !m2.logViewRequested {
+		t.Error("expected logViewRequested to be true after Y")
 	}
-
-	// Simulate logViewReadyMsg arriving.
-	m3, _ := m2.Update(logViewReadyMsg{lines: []string{"line 1", "line 2"}})
-	if !m3.logViewOpen {
-		t.Error("expected logViewOpen after logViewReadyMsg")
+	if cmd == nil {
+		t.Error("expected tea.Quit to be returned after Y")
 	}
 }
 
@@ -103,8 +100,11 @@ func TestExecModelLogPromptEnterOpensViewer(t *testing.T) {
 	if m2.awaitingLogPrompt {
 		t.Error("awaitingLogPrompt should be cleared after Enter")
 	}
+	if !m2.logViewRequested {
+		t.Error("expected logViewRequested to be true after Enter")
+	}
 	if cmd == nil {
-		t.Error("expected loadLogCmd to be returned after Enter")
+		t.Error("expected tea.Quit to be returned after Enter")
 	}
 }
 
@@ -135,13 +135,6 @@ func TestExecModelLogPromptEscQuits(t *testing.T) {
 
 
 
-func TestExecModelLogViewerViewportHeight(t *testing.T) {
-	h := logViewerViewportHeight(24)
-	if h != 21 {
-		t.Errorf("expected height 21, got %d", h)
-	}
-}
-
 func TestExecModelTaskCounting(t *testing.T) {
 	m := NewExecModel("install", "1.0.0", nil, nil, nil, nil, 10, 80, 24)
 
@@ -158,38 +151,6 @@ func TestExecModelTaskCounting(t *testing.T) {
 	})
 	if m.tasksDone != 3 {
 		t.Errorf("expected tasksDone=3, got %d", m.tasksDone)
-	}
-}
-
-func TestOpenLogViewerCmdWithLines(t *testing.T) {
-	lines := []string{"line1", "line2", "line3"}
-	cmd := openLogViewerCmd(lines)
-	if cmd == nil {
-		t.Fatal("expected non-nil cmd")
-	}
-	msg := cmd()
-	ready, ok := msg.(logViewReadyMsg)
-	if !ok {
-		t.Fatalf("expected logViewReadyMsg, got %T", msg)
-	}
-	if len(ready.lines) != 3 {
-		t.Errorf("expected 3 lines, got %d", len(ready.lines))
-	}
-	if ready.lines[0] != "line1" {
-		t.Errorf("expected first line 'line1', got %q", ready.lines[0])
-	}
-}
-
-func TestOpenLogViewerCmdEmpty(t *testing.T) {
-	// When no lines accumulated, should return a placeholder message.
-	cmd := openLogViewerCmd(nil)
-	msg := cmd()
-	ready, ok := msg.(logViewReadyMsg)
-	if !ok {
-		t.Fatalf("expected logViewReadyMsg, got %T", msg)
-	}
-	if len(ready.lines) == 0 {
-		t.Error("expected fallback message, got empty lines")
 	}
 }
 

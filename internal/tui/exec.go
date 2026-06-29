@@ -25,7 +25,6 @@ import (
 	"strings"
 	"time"
 
-	"charm.land/bubbles/v2/viewport"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 )
@@ -37,15 +36,6 @@ const (
 	// taskLogPrefix is the string that begins a new Ansible task line in the log.
 	// Used to count completed tasks for the progress indicator.
 	taskLogPrefix = "TASK ["
-
-	// viewportMinHeight ensures the log area is always usable.
-	viewportMinHeight = 5
-
-	// logViewHeaderHeight: title + divider.
-	logViewHeaderHeight = 2
-
-	// logViewFooterHeight: hint line.
-	logViewFooterHeight = 1
 )
 
 // execTickMsg fires periodically to advance the spinner animation.
@@ -53,9 +43,6 @@ type execTickMsg time.Time
 
 // execDoneMsg is sent when the ansible-playbook process exits.
 type execDoneMsg struct{ err error }
-
-// logViewReadyMsg is sent to open the full-screen log viewer with accumulated lines.
-type logViewReadyMsg struct{ lines []string }
 
 // ansibleEventMsg carries one parsed event from the ansible.posix.jsonl stdout stream.
 // A single message can carry a task-name update, formatted log lines, or an EOF signal.
@@ -100,13 +87,8 @@ type ExecModel struct {
 	output *bytes.Buffer
 
 	// logLines accumulates all formatted log lines produced from JSON events.
-	// Used as the source for the full-screen log viewer on failure — avoids
-	// any dependency on a log file on disk.
+	// Printed to stdout after BubbleTea exits if the user requested log view.
 	logLines []string
-
-	// logViewer is the full-screen viewport shown when the user chooses
-	// to view the full log after a failure.
-	logViewer viewport.Model
 
 	// tasksDone is the number of Ansible tasks completed so far, counted
 	// by detecting "TASK [" lines in the accumulated log output.
@@ -137,8 +119,10 @@ type ExecModel struct {
 	// prompt and are waiting for the user's answer.
 	awaitingLogPrompt bool
 
-	// logViewOpen is true once the user has said Y and the log viewer is active.
-	logViewOpen bool
+	// logViewRequested is true once the user has said Y and the program should
+	// quit and display the log. After BubbleTea exits, the log is printed to stdout
+	// with native terminal scrolling and selection support.
+	logViewRequested bool
 
 	// stdoutEOF is true once readTaskCmd has returned ansibleEventMsg{eof:true},
 	// meaning the stdout pipe has been fully drained and all vsh_stdout
@@ -177,10 +161,6 @@ func NewExecModel(command, version string, proc *exec.Cmd, ansibleOut io.Reader,
 func (e ExecModel) SetSize(width, height int) ExecModel {
 	e.width = width
 	e.height = height
-	if e.logViewOpen {
-		e.logViewer.SetWidth(width)
-		e.logViewer.SetHeight(logViewerViewportHeight(height))
-	}
 	return e
 }
 
@@ -241,31 +221,12 @@ func (e ExecModel) Update(msg tea.Msg) (ExecModel, tea.Cmd) {
 		// On failure: user must press a key first, then we show the prompt.
 		return e, nil
 
-	case logViewReadyMsg:
-		// The log file has been read — open the full-screen viewer.
-		e.logViewer = viewport.New(
-			viewport.WithWidth(e.width),
-			viewport.WithHeight(logViewerViewportHeight(e.height)),
-		)
-		e.logViewer.SoftWrap = true // Enable line wrapping for long lines
-		e.logViewer.SetContent(strings.Join(msg.lines, "\n"))
-		e.logViewer.GotoBottom()
-		e.logViewOpen = true
-		return e, nil
-
 	case tea.KeyPressMsg:
 		return e.handleKey(msg)
 
 	case tea.WindowSizeMsg:
 		e = e.SetSize(msg.Width, msg.Height)
 		return e, nil
-	}
-
-	// Route remaining messages to the log viewer if open.
-	if e.logViewOpen {
-		var cmd tea.Cmd
-		e.logViewer, cmd = e.logViewer.Update(msg)
-		return e, cmd
 	}
 
 	// All other states consume the message but don't update anything.
@@ -276,26 +237,13 @@ func (e ExecModel) Update(msg tea.Msg) (ExecModel, tea.Cmd) {
 func (e ExecModel) handleKey(msg tea.KeyPressMsg) (ExecModel, tea.Cmd) {
 	key := msg.String()
 
-	// Log viewer is open — scroll, copy, or quit.
-	if e.logViewOpen {
-		switch key {
-		case "q", "esc", "ctrl+c":
-			return e, tea.Quit
-		case "C":
-			copyToClipboardOSC52(e.logViewer.GetContent())
-			return e, nil
-		}
-		var cmd tea.Cmd
-		e.logViewer, cmd = e.logViewer.Update(msg)
-		return e, cmd
-	}
-
 	// Awaiting Y/n prompt after failure.
 	if e.awaitingLogPrompt {
 		switch key {
 		case "y", "Y", "enter":
 			e.awaitingLogPrompt = false
-			return e, openLogViewerCmd(e.logLines)
+			e.logViewRequested = true
+			return e, tea.Quit
 		case "n", "esc", "q", "ctrl+c":
 			return e, tea.Quit
 		}
@@ -326,9 +274,10 @@ func (e ExecModel) handleKey(msg tea.KeyPressMsg) (ExecModel, tea.Cmd) {
 		if key == "ctrl+c" || key == "esc" || key == "q" {
 			return e, tea.Quit
 		}
-		// If user presses y/Y, skip the prompt and open the log directly.
+		// If user presses y/Y, skip the prompt and request log view.
 		if key == "y" || key == "Y" {
-			return e, openLogViewerCmd(e.logLines)
+			e.logViewRequested = true
+			return e, tea.Quit
 		}
 		// Any other key: show the prompt and wait for response.
 		e.awaitingLogPrompt = true
@@ -339,11 +288,8 @@ func (e ExecModel) handleKey(msg tea.KeyPressMsg) (ExecModel, tea.Cmd) {
 	return e, tea.Quit
 }
 
-// View renders the CLI view or the log viewer.
+// View renders the CLI view.
 func (e ExecModel) View() string {
-	if e.logViewOpen {
-		return e.logViewerView()
-	}
 	return e.cliView()
 }
 
@@ -381,38 +327,6 @@ func (e ExecModel) cliView() string {
 }
 
 // logViewerView renders the full-screen log viewer.
-func (e ExecModel) logViewerView() string {
-	var output strings.Builder
-
-	// Header: title + line count.
-	header := styles.Header.Render("▶ Execution log")
-	hint := styles.Version.Render(fmt.Sprintf("(%d lines)", len(e.logLines)))
-	versionPadding := e.width - lipgloss.Width(header) - lipgloss.Width(hint) - 2
-	if versionPadding < 1 {
-		versionPadding = 1
-	}
-	_, _ = fmt.Fprintln(&output, header+strings.Repeat(" ", versionPadding)+hint)
-	_, _ = fmt.Fprintln(&output, styles.Divider.Render(strings.Repeat("─", e.width)))
-
-	// Scrollable viewport.
-	_, _ = fmt.Fprintln(&output, e.logViewer.View())
-
-	// Footer hint.
-	_, _ = fmt.Fprintln(&output, styles.Divider.Render(strings.Repeat("─", e.width)))
-	_, _ = fmt.Fprint(&output,
-		styles.HelpKey.Render("↑/↓")+
-			styles.HelpDesc.Render(" scroll   ")+
-			styles.HelpKey.Render("drag")+
-			styles.HelpDesc.Render(" select   ")+
-			styles.HelpKey.Render("C")+
-			styles.HelpDesc.Render(" copy all   ")+
-			styles.HelpKey.Render("q/esc")+
-			styles.HelpDesc.Render(" exit"),
-	)
-
-	return output.String()
-}
-
 // spinnerFrames are the animation frames for the progress spinner.
 // Each frame is displayed for one logPollInterval (100ms).
 // Used as a fallback when totalTasks is unknown.
@@ -479,6 +393,14 @@ func (e ExecModel) IsDone() bool { return e.done }
 // Err returns the subprocess exit error, if any.
 func (e ExecModel) Err() error { return e.err }
 
+// LogViewRequested returns true if the user requested to view the full log.
+// After BubbleTea exits, the caller should display the log via printLogView().
+func (e ExecModel) LogViewRequested() bool { return e.logViewRequested }
+
+// LogLines returns the accumulated formatted log lines.
+// Typically used after BubbleTea exits to display the log via printLogView().
+func (e ExecModel) LogLines() []string { return e.logLines }
+
 // copyToClipboardOSC52 copies the given text to the system clipboard using the
 // OSC 52 escape sequence. This works in modern terminals like iTerm2, Kitty,
 // WezTerm, Alacritty, and tmux (with set-clipboard on). If the terminal doesn't
@@ -530,15 +452,6 @@ func waitForProcess(cmd *exec.Cmd) tea.Cmd {
 
 // openLogViewerCmd delivers a logViewReadyMsg from the already-accumulated
 // logLines slice. No file I/O — the lines were built from JSON events in-process.
-func openLogViewerCmd(lines []string) tea.Cmd {
-	if len(lines) == 0 {
-		lines = []string{"(no log output captured)"}
-	}
-	return func() tea.Msg {
-		return logViewReadyMsg{lines: lines}
-	}
-}
-
 // readTaskCmd returns a tea.Cmd that blocks reading JSON lines from the
 // ansible.posix.jsonl stdout stream and returns an ansibleEventMsg for each
 // parsed event:
@@ -785,14 +698,6 @@ func parseLogTaskName(line string) string {
 }
 
 // logViewerViewportHeight calculates the log viewer viewport height.
-func logViewerViewportHeight(totalHeight int) int {
-	h := totalHeight - logViewHeaderHeight - logViewFooterHeight
-	if h < viewportMinHeight {
-		h = viewportMinHeight
-	}
-	return h
-}
-
 // IsTTY reports whether stdout is connected to a terminal.
 func IsTTY() bool {
 	fi, err := os.Stdout.Stat()
