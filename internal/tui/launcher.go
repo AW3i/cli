@@ -30,6 +30,11 @@ type screen int
 const (
 	screenList   screen = iota // navigating the horizontal command bar
 	screenInline               // inline box open (arg input + docs)
+	screenHelp                 // help view for current command (read-only, scrollable)
+
+	// helpViewMaxLines is the maximum number of content lines shown in the help view.
+	// Matches inlineBoxMaxDocLines to keep the UI consistent and prevent viewport jumps.
+	helpViewMaxLines = 8
 )
 
 // stackEntry records a navigation level so we can Esc back.
@@ -77,6 +82,18 @@ type model struct {
 	// width/height of the terminal at last WindowSizeMsg.
 	width  int
 	height int
+
+	// helpLines are the wrapped lines of help text shown in the help view.
+	helpLines []string
+
+	// helpOffset is the scroll position (0-indexed line) in helpLines.
+	helpOffset int
+
+	// helpTitle is the command path shown in the help view header, e.g. "valet.sh init-instance".
+	helpTitle string
+
+	// helpCmd is the cobra command being viewed; used to trigger inline box on Enter.
+	helpCmd CommandItem
 }
 
 // Result is returned by Run() after the TUI exits.
@@ -191,6 +208,9 @@ func (m model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 
 	case screenInline:
 		return m.handleInlineKey(key, msg)
+
+	case screenHelp:
+		return m.handleHelpKey(key, msg)
 	}
 
 	return m, nil
@@ -232,6 +252,11 @@ func (m model) handleListKey(key string, msg tea.KeyPressMsg) (tea.Model, tea.Cm
 		} else {
 			return m.popStack()
 		}
+	case "?":
+		// Show help for the selected command (if it's a leaf).
+		if m.commandList.FilterState() != list.Filtering {
+			return m.openHelp()
+		}
 	case "enter":
 		if m.commandList.FilterState() != list.Filtering {
 			return m.selectItem()
@@ -248,6 +273,12 @@ func (m model) handleListKey(key string, msg tea.KeyPressMsg) (tea.Model, tea.Cm
 // handleInlineKey handles key events when the inline box is open.
 func (m model) handleInlineKey(key string, msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	switch key {
+	case "?":
+		// Close inline box and show help for the selected command.
+		m.inlineBox = nil
+		m.activeScreen = screenList
+		return m.openHelp()
+
 	case "esc":
 		// Close inline box, return to list.
 		m.inlineBox = nil
@@ -338,6 +369,120 @@ func (m model) popStack() (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+// openHelp opens the help view for the selected command.
+func (m model) openHelp() (tea.Model, tea.Cmd) {
+	sel, ok := m.commandList.SelectedItem().(CommandItem)
+	if !ok {
+		return m, nil
+	}
+
+	// Only show help for leaf commands.
+	if sel.IsBack || sel.HasSubCommands() {
+		return m, nil
+	}
+
+	// Build help content: Usage + description + full help text.
+	var helpText strings.Builder
+	if sel.Cmd.Use != "" {
+		helpText.WriteString("Usage: " + sel.Cmd.Use + "\n\n")
+	}
+	if sel.Cmd.Short != "" {
+		helpText.WriteString(sel.Cmd.Short + "\n\n")
+	}
+	if sel.Cmd.Long != "" {
+		helpText.WriteString(sel.Cmd.Long)
+	}
+
+	// Word-wrap to terminal width, leaving 2-character margin.
+	wrapped := wordWrap(helpText.String(), m.width-2)
+	helpLines := strings.Split(wrapped, "\n")
+
+	m.helpTitle = m.fullCommandPath(sel.Title())
+	m.helpLines = helpLines
+	m.helpOffset = 0
+	m.helpCmd = sel
+	m.activeScreen = screenHelp
+	return m, nil
+}
+
+// handleHelpKey handles key events in the help view.
+func (m model) handleHelpKey(key string, msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	maxScroll := len(m.helpLines) - (m.height - 6) // 6 lines for header, divider, footer
+	if maxScroll < 0 {
+		maxScroll = 0
+	}
+
+	switch key {
+	case "j", "down", "ctrl+d":
+		// Scroll down
+		if m.helpOffset < maxScroll {
+			m.helpOffset++
+		}
+		return m, nil
+
+	case "k", "up", "ctrl+u":
+		// Scroll up
+		if m.helpOffset > 0 {
+			m.helpOffset--
+		}
+		return m, nil
+
+	case "q", "esc", "?":
+		// Close help, return to list (? toggles help off)
+		m.activeScreen = screenList
+		return m, nil
+
+	case "enter":
+		// Close help and open inline box for this command
+		m.activeScreen = screenList
+		// Simulate selectItem for the currently selected command
+		path := m.fullCommandPath(m.helpCmd.Title())
+		docs := m.helpCmd.LongDescription()
+		box := NewInlineBox(path, docs, m.inlineBoxWidth())
+		m.inlineBox = &box
+		m.activeScreen = screenInline
+		return m, nil
+	}
+
+	return m, nil
+}
+
+// helpView renders the full help screen with scrollable content.
+func (m model) helpView() string {
+	var output strings.Builder
+
+	_, _ = fmt.Fprintln(&output, m.headerView())
+	_, _ = fmt.Fprintln(&output, dividerLine(m.width))
+
+	// Use fixed height to prevent viewport jumps when opening help.
+	contentHeight := helpViewMaxLines
+
+	// Slice the visible portion of helpLines based on scroll offset.
+	endLine := m.helpOffset + contentHeight
+	if endLine > len(m.helpLines) {
+		endLine = len(m.helpLines)
+	}
+
+	visibleLines := m.helpLines[m.helpOffset:endLine]
+	for _, line := range visibleLines {
+		_, _ = fmt.Fprintln(&output, "  "+line)
+	}
+
+	// Pad with blank lines if we're not at the end.
+	for len(visibleLines) < contentHeight {
+		_, _ = fmt.Fprintln(&output)
+		visibleLines = append(visibleLines, "")
+	}
+
+	_, _ = fmt.Fprintln(&output, dividerLine(m.width))
+
+	// Footer with navigation hints.
+	footer := "  ↑/↓ scroll   j/k vim scroll   q/esc close   enter run"
+	_, _ = fmt.Fprint(&output, footer)
+
+	return output.String()
+}
+
 // routeMsg forwards non-key messages to the active component.
 func (m model) routeMsg(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmd tea.Cmd
@@ -385,6 +530,8 @@ func (m model) render() string {
 		_, _ = fmt.Fprintln(&output, m.inlineBox.View())
 		_, _ = fmt.Fprintln(&output, dividerLine(m.width))
 		_, _ = fmt.Fprint(&output, renderInlineHelpBar(m.width))
+	case m.activeScreen == screenHelp:
+		_, _ = fmt.Fprint(&output, m.helpView())
 	default:
 		// Show command list for screenList
 		_, _ = fmt.Fprintln(&output, renderHorizontalList(m.commandList, m.width))

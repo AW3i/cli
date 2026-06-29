@@ -193,8 +193,9 @@ func renderHorizontalList(commandList list.Model, maxWidth int) string {
 
 	// Build a left-anchored sliding window that fits in maxWidth.
 	// Reserve space for the scroll indicators (2 chars each side).
+	// Subtract 1 for ambiguous-width characters (e.g., ▶ in Nerd Fonts renders as 2 cols).
 	const scrollIndicatorWidth = 2
-	available := maxWidth - scrollIndicatorWidth*2
+	available := maxWidth - scrollIndicatorWidth*2 - 1
 
 	// Fill the window from the left (index 0) as far right as width allows.
 	start := 0
@@ -262,7 +263,8 @@ func renderHelpBar(vimMode bool, width int) string {
 	if vimMode {
 		bindings = []struct{ key, desc string }{
 			{"h/l", "navigate"},
-			{"type to search", ""},
+			{"/", "filter"},
+			{"?", "help"},
 			{"↵", "select"},
 			{"esc", "back"},
 			{"q", "quit"},
@@ -271,7 +273,8 @@ func renderHelpBar(vimMode bool, width int) string {
 	} else {
 		bindings = []struct{ key, desc string }{
 			{"←/→", "navigate"},
-			{"type to search", ""},
+			{"/", "filter"},
+			{"?", "help"},
 			{"↵", "select"},
 			{"esc", "back"},
 			{"q", "quit"},
@@ -302,6 +305,7 @@ func renderHelpBar(vimMode bool, width int) string {
 // renderInlineHelpBar renders the help line shown while the inline box is open.
 func renderInlineHelpBar(width int) string {
 	bindings := []struct{ key, desc string }{
+		{"?", "help"},
 		{"↵", "run"},
 		{"ctrl+d/u", "scroll docs"},
 		{"esc", "back"},
