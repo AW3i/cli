@@ -143,5 +143,23 @@ Configuration is driven by a .valet-sh.yml file in each project directory.`,
 		cmd.AddCommand(discovered...)
 	}
 
+	// Add built-in self-upgrade command
+	cmd.AddCommand(&cobra.Command{
+		Use:   "self-upgrade",
+		Short: "Check for and apply updates to valet-sh CLI and playbooks",
+		Long: `self-upgrade checks for new versions of both the valet-sh CLI and the
+Ansible playbook repository, and applies updates if available.
+
+It performs the following:
+  1. Checks the valet-sh-cli GitHub releases for a newer CLI binary
+  2. Checks the valet-sh GitHub repository for playbook updates
+  3. Downloads and installs updates with SHA256 verification
+  4. Re-executes your original command with the updated CLI if needed`,
+		SilenceUsage: true,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			return updater.SelfUpgrade(Version, os.Args, platform.RepoDir())
+		},
+	})
+
 	return cmd
 }

@@ -12,8 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Package updater performs a periodic background check for new valet-sh
-// releases and prompts the user to update when one is available.
+// Package updater performs a periodic background check for new valet-sh-cli
+// releases and valet-sh playbook updates, prompting the user when available.
 package updater
 
 import (
@@ -23,6 +23,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
@@ -36,14 +37,11 @@ const (
 	// timestampFile records the last time the check ran.
 	timestampFile = "/usr/local/valet-sh/etc/.last_update_check"
 
-	// githubReleaseURL is the GitHub API endpoint for the latest release.
-	githubReleaseURL = "https://api.github.com/repos/valet-sh/valet-sh/releases/latest"
+	// cliReleaseURL is the GitHub API endpoint for the latest valet-sh-cli release.
+	cliReleaseURL = "https://api.github.com/repos/valet-sh/valet-sh-cli/releases/latest"
 
 	// apiTimeout caps the HTTP call so a slow network never blocks the user.
 	apiTimeout = 3 * time.Second
-
-	// installerBin is the update command.
-	installerBin = "/usr/local/valet-sh/installer/valet-sh-installer"
 )
 
 // ANSI codes — same values as the Python callback plugin and help.go.
@@ -64,12 +62,13 @@ type releaseResponse struct {
 	TagName string `json:"tag_name"`
 }
 
-// Check runs the periodic update check. It is a no-op when:
+// Check runs the periodic update check for both CLI and Ansible playbook repo.
+// It is a no-op when:
 //   - the check was run less than checkInterval ago
 //   - the GitHub API is unreachable (fails silently)
 //   - currentVersion is "dev" (local development build)
 //
-// originalArgs is os.Args so the command can be re-executed after updating.
+// originalArgs is os.Args so the command can be re-executed after a CLI update.
 func Check(currentVersion string, originalArgs []string) {
 	if currentVersion == "dev" {
 		return
@@ -83,29 +82,106 @@ func Check(currentVersion string, originalArgs []string) {
 	// the check to hammer the API on every subsequent invocation.
 	writeTimestamp()
 
-	latest, err := fetchLatestTag()
-	if err != nil {
-		// Silent — network issues should never interrupt normal usage.
-		return
-	}
+	repoDir := "/usr/local/valet-sh/valet-sh"
 
-	if !isNewer(latest, currentVersion) {
-		return
-	}
+	// Check for CLI updates
+	cliNewer, cliLatest := checkCliUpdate(currentVersion)
 
-	printUpdatePrompt(currentVersion, latest)
+	// Check for Ansible playbook updates (only if repo exists)
+	ansibleNewer := checkAnsibleUpdate(repoDir)
 
-	if !askYesNo() {
-		fmt.Println(info(fmt.Sprintf("Skipping. Run 'valet-sh-installer update' to upgrade to %s anytime.", green(latest))))
-		fmt.Println()
+	// If neither has updates, we're done
+	if !cliNewer && !ansibleNewer {
 		return
 	}
 
 	fmt.Println()
-	runUpdate()
 
-	// Re-exec the original command so the user doesn't have to retype it.
-	reExec(originalArgs)
+	// Prompt for CLI update if available
+	cliUpdated := false
+	if cliNewer {
+		printCliUpdatePrompt(currentVersion, cliLatest)
+		if askYesNo() {
+			fmt.Println()
+			cliUpdated = promptSelfUpgrade()
+		} else {
+			fmt.Println(info(fmt.Sprintf("Skipping. Run 'valet self-upgrade' to upgrade anytime.")))
+			fmt.Println()
+		}
+	}
+
+	// Prompt for Ansible update if available (and didn't already update CLI)
+	if ansibleNewer && !cliUpdated {
+		printAnsibleUpdatePrompt()
+		if askYesNo() {
+			fmt.Println()
+			promptSelfUpgrade()
+		} else {
+			fmt.Println(info("Skipping. Run 'valet self-upgrade' to upgrade anytime."))
+			fmt.Println()
+		}
+	}
+
+	// If CLI was updated, re-exec the original command with the new binary
+	if cliUpdated {
+		reExec(originalArgs)
+	}
+}
+
+// checkCliUpdate returns true if a newer CLI version is available, along with the latest tag.
+func checkCliUpdate(currentVersion string) (bool, string) {
+	latest, err := fetchLatestCliTag()
+	if err != nil {
+		return false, ""
+	}
+	return isNewer(latest, currentVersion), latest
+}
+
+// checkAnsibleUpdate returns true if the Ansible repo has updates available.
+func checkAnsibleUpdate(repoDir string) bool {
+	// Check if the repo directory exists and is a git repo
+	gitDir := filepath.Join(repoDir, ".git")
+	if _, err := os.Stat(gitDir); err != nil {
+		return false
+	}
+
+	// Fetch from remote to check if there are updates
+	cmd := exec.Command("git", "-C", repoDir, "fetch", "--quiet", "origin", "master")
+	if err := cmd.Run(); err != nil {
+		// Silently skip if fetch fails
+		return false
+	}
+
+	// Compare local HEAD with remote HEAD
+	localHeadCmd := exec.Command("git", "-C", repoDir, "rev-parse", "HEAD")
+	localHead, err := localHeadCmd.Output()
+	if err != nil {
+		return false
+	}
+
+	remoteHeadCmd := exec.Command("git", "-C", repoDir, "rev-parse", "origin/master")
+	remoteHead, err := remoteHeadCmd.Output()
+	if err != nil {
+		return false
+	}
+
+	localHeadStr := strings.TrimSpace(string(localHead))
+	remoteHeadStr := strings.TrimSpace(string(remoteHead))
+
+	return localHeadStr != remoteHeadStr
+}
+
+// promptSelfUpgrade calls valet self-upgrade and returns true if the CLI was updated.
+func promptSelfUpgrade() bool {
+	cmd := exec.Command("valet", "self-upgrade")
+	cmd.Stdin = os.Stdin
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	if err := cmd.Run(); err != nil {
+		fmt.Fprintf(os.Stderr, "%s self-upgrade failed: %v\n", ansiRed+"✘"+ansiReset, err)
+		return false
+	}
+	return true
 }
 
 // checkDue returns true if the timestamp file is missing or older than checkInterval.
@@ -126,10 +202,10 @@ func writeTimestamp() {
 	_ = f.Close()
 }
 
-// fetchLatestTag queries the GitHub releases API and returns the tag name.
-func fetchLatestTag() (string, error) {
+// fetchLatestCliTag queries the GitHub CLI releases API and returns the tag name.
+func fetchLatestCliTag() (string, error) {
 	client := &http.Client{Timeout: apiTimeout}
-	req, err := http.NewRequest(http.MethodGet, githubReleaseURL, http.NoBody)
+	req, err := http.NewRequest(http.MethodGet, cliReleaseURL, http.NoBody)
 	if err != nil {
 		return "", err
 	}
@@ -199,16 +275,22 @@ func IsHelpOrVersionCall(args []string) bool {
 	return false
 }
 
-// printUpdatePrompt displays the styled update notification.
-func printUpdatePrompt(current, latest string) {
-	fmt.Println()
+// printCliUpdatePrompt displays the CLI update notification.
+func printCliUpdatePrompt(current, latest string) {
 	fmt.Printf("%s %s → %s\n",
-		blue("▶ New version available:"),
+		blue("▶ New CLI version available:"),
 		current,
 		green(latest),
 	)
-	fmt.Printf("  %s\n\n", info("Run 'valet-sh-installer update' to upgrade, or answer below."))
-	fmt.Print("  Update now? [y/N] ")
+	fmt.Printf("  %s\n", info("Run 'valet self-upgrade' to upgrade anytime."))
+	fmt.Print("  Update CLI now? [y/N] ")
+}
+
+// printAnsibleUpdatePrompt displays the Ansible playbook update notification.
+func printAnsibleUpdatePrompt() {
+	fmt.Printf("%s\n", blue("▶ valet-sh playbook updates are available"))
+	fmt.Printf("  %s\n", info("Run 'valet self-upgrade' to upgrade anytime."))
+	fmt.Print("  Update playbooks now? [y/N] ")
 }
 
 // askYesNo reads a single line from stdin and returns true for "y" or "Y".
@@ -219,18 +301,6 @@ func askYesNo() bool {
 	}
 	answer := strings.TrimSpace(scanner.Text())
 	return strings.EqualFold(answer, "y")
-}
-
-// runUpdate executes valet-sh-installer update, streaming output to the
-// terminal. On failure it prints a warning but does not abort.
-func runUpdate() {
-	cmd := exec.Command(installerBin, "update")
-	cmd.Stdin = os.Stdin
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	if err := cmd.Run(); err != nil {
-		fmt.Fprintf(os.Stderr, "%s update failed: %v\n", ansiRed+"✘"+ansiReset, err)
-	}
 }
 
 // reExec replaces the current process with a fresh invocation of the same
