@@ -15,7 +15,6 @@
 package tui
 
 import (
-	"bufio"
 	"bytes"
 	"encoding/base64"
 	"encoding/json"
@@ -24,7 +23,6 @@ import (
 	"os"
 	"os/exec"
 	"strings"
-	"syscall"
 	"time"
 
 	"charm.land/bubbles/v2/viewport"
@@ -33,11 +31,8 @@ import (
 )
 
 const (
-	// logPath is where the Ansible callback plugin writes all task output.
-	logPath = "/usr/local/valet-sh/valet-sh/log/debug.log"
-
-	// logPollInterval is how often we check for new log lines while running.
-	logPollInterval = 50 * time.Millisecond
+	// spinnerTickInterval is how often the spinner animation advances.
+	spinnerTickInterval = 50 * time.Millisecond
 
 	// viewportMinHeight ensures the log area is always usable.
 	viewportMinHeight = 5
@@ -57,35 +52,32 @@ const (
 	// does not jump when the prompt appears.
 	execFooterHeightPrompt = 3
 
-	// logViewMaxLines is the maximum number of lines loaded from the log
-	// file when the viewer is opened after a failure. Keeps rendering fast
-	// even for very large log files accumulated over many runs.
-	logViewMaxLines = 10_000
-
-	// logViewHeaderHeight: file path + divider.
+	// logViewHeaderHeight: title + divider.
 	logViewHeaderHeight = 2
 
 	// logViewFooterHeight: hint line.
 	logViewFooterHeight = 1
 )
 
-// execTickMsg fires periodically to poll the log file for new content.
+// execTickMsg fires periodically to advance the spinner animation.
 type execTickMsg time.Time
-
-// logLineMsg carries a new line read from the log file.
-type logLineMsg string
 
 // execDoneMsg is sent when the ansible-playbook process exits.
 type execDoneMsg struct{ err error }
 
-// logViewReadyMsg is sent when tailFile() has finished reading the log.
-// It is delivered via tea.Cmd so the file read never blocks the render loop.
+// logViewReadyMsg is sent to open the full-screen log viewer with accumulated lines.
 type logViewReadyMsg struct{ lines []string }
 
-// ansibleTaskMsg carries a task name read from ansible-playbook's stdout.
-// ansible.posix.jsonl emits a JSON line per event; we extract the task name
-// from v2_playbook_on_task_start / v2_runner_on_start events.
-type ansibleTaskMsg string
+// ansibleEventMsg carries one parsed event from the ansible.posix.jsonl stdout stream.
+// A single message can carry a task-name update, formatted log lines, or an EOF signal.
+type ansibleEventMsg struct {
+	// taskName, when non-empty, updates the spinner's current task display.
+	taskName string
+	// logLines are formatted lines to append to the live log viewport.
+	logLines []string
+	// eof is true when the stdout pipe is closed — no more events will arrive.
+	eof bool
+}
 
 // ExecModel is a Bubble Tea model that shows a scrollable live log panel
 // while an ansible-playbook subprocess is running. On failure it offers
@@ -124,18 +116,10 @@ type ExecModel struct {
 	// Read by runExecPanel() after p.Run() returns.
 	output *bytes.Buffer
 
-	// logFilePath is the path to the debug.log file.
-	logFilePath string
-
-	// logFileInode tracks the inode of the debug.log file.
-	// When the inode changes, it indicates the file has been rotated (Ansible re-opened it).
-	// We reset logFileOffset to 0 to read the new file from the start.
-	logFileInode uint64
-
-	// logFileOffset tracks the current read position in the log file.
-	// A fresh file handle and bufio.Reader are created each tick starting from this offset.
-	// When logFileInode changes (rotation detected), this is reset to 0.
-	logFileOffset int64
+	// logLines accumulates all formatted log lines produced from JSON events.
+	// Used as the source for the full-screen log viewer on failure — avoids
+	// any dependency on a log file on disk.
+	logLines []string
 
 	// viewport is the rolling live-log panel shown during execution.
 	viewport viewport.Model
@@ -192,13 +176,6 @@ type ExecModel struct {
 // cleanup is a function that deletes temporary files (passwords, extra-vars) after the process exits.
 // totalTasks is the total number of tasks (from --list-tasks), or 0 if unknown.
 // width/height are the dimensions of the panel area.
-//
-// Note: the log file is NOT opened here because the Ansible callback plugin
-// rotates debug.log on startup (logger.handlers[0].doRollover()). If we open
-// the file before the subprocess starts, we end up with a handle to the
-// now-rotated debug.log.1, missing all new output. Instead, we open the file
-// lazily in readNewLogLines() after the rotation has already occurred.
-// NewExecModel creates a new ExecModel ready to run.
 // output is a shared *bytes.Buffer that readTaskCmd writes vsh_stdout content
 // to directly (bypassing the BubbleTea message queue). The caller reads from
 // it after p.Run() returns to print tables/listings to the terminal.
@@ -234,78 +211,61 @@ func (e ExecModel) SetSize(width, height int) ExecModel {
 	return e
 }
 
-// Init starts the log poller, the process waiter, and the stdout task reader.
-// The first tick is delayed 300ms to allow Ansible to start, load modules,
-// and rotate the log file before we attempt to open it. Subsequent ticks
-// fire every 50ms.
+// Init starts the spinner ticker, the process waiter, and the stdout event reader.
 func (e ExecModel) Init() tea.Cmd {
 	return tea.Batch(
-		firstTickCmd(), // 300ms delay for first read (after Ansible rotates)
+		tickCmd(),
 		waitForProcess(e.proc),
-		readTaskCmd(e.ansibleOut, e.output), // stream task names from ansible stdout
+		readTaskCmd(e.ansibleOut, e.output),
 	)
 }
 
-// Update handles log lines, tick events, process exit, and key presses.
+// Update handles events, tick, process exit, and key presses.
 func (e ExecModel) Update(msg tea.Msg) (ExecModel, tea.Cmd) {
 	switch msg := msg.(type) {
-	case ansibleTaskMsg:
-		// A new task name arrived from ansible's stdout JSON stream.
-		if string(msg) != "" {
-			e.currentTask = string(msg)
-			// Queue the next read only when we got real data.
-			// Empty msg means EOF (process exited) — stop re-queuing.
-			return e, readTaskCmd(e.ansibleOut, e.output)
+	case ansibleEventMsg:
+		if msg.eof {
+			// Stdout pipe fully drained — all vsh_stdout content is in the buffer.
+			e.stdoutEOF = true
+			// Quit in CLI success mode only when execDoneMsg has also arrived.
+			// If execDoneMsg arrived first: done=true → quit now.
+			// If this arrives first: done=false → set flag, execDoneMsg will quit.
+			if e.done && !e.withSidebar && e.err == nil {
+				return e, tea.Quit
+			}
+			return e, nil
 		}
-		// EOF from readTaskCmd — the stdout pipe is fully drained. All
-		// vsh_stdout content has been written to the output buffer.
-		e.stdoutEOF = true
-		// Quit in CLI success mode only when execDoneMsg has also arrived.
-		// If execDoneMsg arrives first (common): done=true here → quit now.
-		// If ansibleTaskMsg("") arrives first (less common): done=false →
-		// set stdoutEOF=true and wait; execDoneMsg handler will quit below.
-		if e.done && !e.withSidebar && e.err == nil {
-			return e, tea.Quit
+		if msg.taskName != "" {
+			e.currentTask = msg.taskName
 		}
-		return e, nil
+		if len(msg.logLines) > 0 {
+			e.appendLines(msg.logLines)
+		}
+		return e, readTaskCmd(e.ansibleOut, e.output)
 
 	case execTickMsg:
-		lines := e.readNewLogLines()
-		if len(lines) > 0 {
-			e.appendLines(lines)
-		}
 		if !e.done {
 			e.spinnerFrame++
 			return e, tickCmd()
 		}
 		return e, nil
 
-	case logLineMsg:
-		e.appendLine(string(msg))
-		return e, nil
-
 	case execDoneMsg:
-		// Final log drain before marking done.
-		lines := e.readNewLogLines()
-		if len(lines) > 0 {
-			e.appendLines(lines)
-		}
 		e.done = true
 		e.err = msg.err
-		// Clean up temporary files (become password file, extra-vars file).
+		// Clean up temporary files (password file, extra-vars file).
 		if e.cleanup != nil {
 			e.cleanup()
 		}
 		// Quit in CLI success mode only after stdout is fully drained.
-		// If stdoutEOF is already true (ansibleTaskMsg("") arrived first):
+		// If stdoutEOF is already true (ansibleEventMsg{eof:true} arrived first):
 		// safe to quit now — buffer is complete.
-		// If stdoutEOF is false (ansibleTaskMsg("") hasn't arrived yet):
-		// don't quit yet — ansibleTaskMsg("") handler will quit when it fires.
+		// If stdoutEOF is false (pipe not yet drained):
+		// don't quit yet — ansibleEventMsg{eof:true} handler will quit when it fires.
 		if !e.withSidebar && e.err == nil && e.stdoutEOF {
 			return e, tea.Quit
 		}
 		// On failure: user must press a key first, then we show the prompt.
-		// Don't resize viewport yet — we'll do that on first keypress if needed.
 		return e, nil
 
 	case logViewReadyMsg:
@@ -361,7 +321,7 @@ func (e ExecModel) handleKey(msg tea.KeyPressMsg) (ExecModel, tea.Cmd) {
 		switch key {
 		case "y", "Y", "enter":
 			e.awaitingLogPrompt = false
-			return e, loadLogCmd()
+			return e, openLogViewerCmd(e.logLines)
 		case "n", "esc", "q", "ctrl+c":
 			return e, tea.Quit
 		}
@@ -399,7 +359,7 @@ func (e ExecModel) handleKey(msg tea.KeyPressMsg) (ExecModel, tea.Cmd) {
 		}
 		// If user presses y/Y, skip the prompt and open the log directly.
 		if key == "y" || key == "Y" {
-			return e, loadLogCmd()
+			return e, openLogViewerCmd(e.logLines)
 		}
 		// If user presses C, copy the viewport content.
 		if key == "C" {
@@ -481,8 +441,8 @@ func (e ExecModel) execView() string {
 	// Progress bar: spinner + task counter while running, checkmark/cross when done.
 	_, _ = fmt.Fprintln(&output, e.progressBarView())
 
-	// Log file divider with label.
-	logLabel := styles.ItemDim.Render(" " + logPath + " ")
+	// Log divider.
+	logLabel := styles.ItemDim.Render(" log ")
 	dividerWidth := e.width - lipgloss.Width(logLabel)
 	if dividerWidth < 1 {
 		dividerWidth = 1
@@ -518,9 +478,9 @@ func (e ExecModel) execView() string {
 func (e ExecModel) logViewerView() string {
 	var output strings.Builder
 
-	// Header: file path + line count hint.
-	header := styles.Header.Render("▶ " + logPath)
-	hint := styles.Version.Render(fmt.Sprintf("(last %d lines)", logViewMaxLines))
+	// Header: title + line count.
+	header := styles.Header.Render("▶ Execution log")
+	hint := styles.Version.Render(fmt.Sprintf("(%d lines)", len(e.logLines)))
 	versionPadding := e.width - lipgloss.Width(header) - lipgloss.Width(hint) - 2
 	if versionPadding < 1 {
 		versionPadding = 1
@@ -589,7 +549,7 @@ func (e ExecModel) statusLines() string {
 
 	if e.err != nil {
 		failLine := lipgloss.NewStyle().Foreground(colourRed).Bold(true).Render(
-			"✘ failed — see " + logPath,
+			"✘ failed",
 		)
 		if e.awaitingLogPrompt {
 			promptLine := styles.HelpDesc.Render("View full log? ") +
@@ -623,19 +583,13 @@ func copyToClipboardOSC52(text string) {
 	_, _ = os.Stdout.WriteString(oscSeq)
 }
 
-// appendLine appends a single line to the live viewport and counts tasks.
-// When a TASK line is found, currentTask is updated to the task name
-// (unless it's a meta-task like include_tasks which should be skipped).
+// appendLine appends a single line to the live viewport, the logLines accumulator,
+// and advances the task counter when a TASK-prefix line is seen.
 func (e *ExecModel) appendLine(line string) {
 	if strings.HasPrefix(line, taskLogPrefix) {
 		e.tasksDone++
-		// Extract and display the current task name.
-		// This is the primary source; the ansibleTaskMsg (stdout pipe) is secondary.
-		// Skip meta-tasks (include_tasks, import_tasks, etc.) — they're not real work.
-		if taskName := parseLogTaskName(line); taskName != "" && !isMetaTask(taskName) {
-			e.currentTask = taskName
-		}
 	}
+	e.logLines = append(e.logLines, line)
 	current := e.viewport.GetContent()
 	if current == "" {
 		e.viewport.SetContent(line)
@@ -645,21 +599,15 @@ func (e *ExecModel) appendLine(line string) {
 	e.viewport.GotoBottom()
 }
 
-// appendLines appends multiple lines to the live viewport in one call,
-// counting tasks as they appear and updating currentTask.
-// Meta-tasks (like include_tasks) are skipped to avoid showing transient control-flow tasks.
+// appendLines appends multiple lines to the live viewport and logLines accumulator,
+// counting TASK-prefix lines to advance the task counter.
 func (e *ExecModel) appendLines(lines []string) {
 	for _, line := range lines {
 		if strings.HasPrefix(line, taskLogPrefix) {
 			e.tasksDone++
-			// Update to the most recent non-meta task in this batch.
-			// Skip include_tasks, import_tasks, etc. — they're not real work.
-			// This ensures currentTask reflects the latest real task found.
-			if taskName := parseLogTaskName(line); taskName != "" && !isMetaTask(taskName) {
-				e.currentTask = taskName
-			}
 		}
 	}
+	e.logLines = append(e.logLines, lines...)
 	joined := strings.Join(lines, "\n")
 	current := e.viewport.GetContent()
 	if current == "" {
@@ -670,78 +618,9 @@ func (e *ExecModel) appendLines(lines []string) {
 	e.viewport.GotoBottom()
 }
 
-// readNewLogLines reads any lines appended to the log file since the last read.
-// The log file is re-opened each tick to detect rotation (inode change) and to
-// avoid bufio.Reader internal state caching issues.
-// When Ansible rotates the log, we detect the inode change and reset to offset 0
-// to read the newly-created file from the start.
-func (e *ExecModel) readNewLogLines() []string {
-	// On first call, set the log file path.
-	if e.logFilePath == "" {
-		e.logFilePath = logPath
-	}
-
-	// Open the file fresh on every tick (don't keep a persistent file handle).
-	// This allows us to detect when Ansible rotates the log file (inode change).
-	f, err := os.Open(e.logFilePath)
-	if err != nil {
-		return nil
-	}
-	defer f.Close()
-
-	// Check the file's inode to detect rotation.
-	stat, err := f.Stat()
-	if err != nil {
-		return nil
-	}
-	currentInode := stat.Sys().(*syscall.Stat_t).Ino
-
-	// If the inode has changed, the file was rotated. Reset offset to 0
-	// to read the newly-created file from the start.
-	if e.logFileInode != 0 && currentInode != e.logFileInode {
-		e.logFileOffset = 0
-	}
-	e.logFileInode = currentInode
-
-	// Seek to the last known position.
-	_, err = f.Seek(e.logFileOffset, io.SeekStart)
-	if err != nil {
-		return nil
-	}
-
-	// Create a fresh buffered reader starting from the current offset.
-	reader := bufio.NewReader(f)
-
-	var lines []string
-	for {
-		line, err := reader.ReadString('\n')
-		// Trim the newline characters but keep the content.
-		line = strings.TrimRight(line, "\r\n")
-		if line != "" {
-			lines = append(lines, line)
-		}
-		if err != nil {
-			// io.EOF or other error — stop reading.
-			// Update offset to resume from here on next tick.
-			pos, _ := f.Seek(0, io.SeekCurrent)
-			e.logFileOffset = pos
-			break
-		}
-	}
-	return lines
-}
-
-// firstTickCmd returns a tea.Cmd that fires after 300ms to allow Ansible
-// to start and rotate the log file before we open it.
-func firstTickCmd() tea.Cmd {
-	return tea.Tick(300*time.Millisecond, func(t time.Time) tea.Msg {
-		return execTickMsg(t)
-	})
-}
-
-// tickCmd returns a tea.Cmd that fires after logPollInterval.
+// tickCmd returns a tea.Cmd that fires after spinnerTickInterval.
 func tickCmd() tea.Cmd {
-	return tea.Tick(logPollInterval, func(t time.Time) tea.Msg {
+	return tea.Tick(spinnerTickInterval, func(t time.Time) tea.Msg {
 		return execTickMsg(t)
 	})
 }
@@ -756,19 +635,30 @@ func waitForProcess(cmd *exec.Cmd) tea.Cmd {
 	}
 }
 
+// openLogViewerCmd delivers a logViewReadyMsg from the already-accumulated
+// logLines slice. No file I/O — the lines were built from JSON events in-process.
+func openLogViewerCmd(lines []string) tea.Cmd {
+	if len(lines) == 0 {
+		lines = []string{"(no log output captured)"}
+	}
+	return func() tea.Msg {
+		return logViewReadyMsg{lines: lines}
+	}
+}
+
 // readTaskCmd returns a tea.Cmd that blocks reading JSON lines from the
-// ansible.posix.jsonl stdout stream until it gets a task-name event:
+// ansible.posix.jsonl stdout stream and returns an ansibleEventMsg for each
+// parsed event:
 //
-//   - v2_playbook_on_task_start / v2_runner_on_start → ansibleTaskMsg(name)
-//   - v2_runner_on_ok with vsh_stdout → written directly to out (no BubbleTea msg)
-//   - EOF / pipe closed → ansibleTaskMsg("") to stop re-queuing
+//   - v2_playbook_on_task_start / v2_runner_on_start → taskName + TASK log line
+//   - v2_runner_on_ok with vsh_stdout → written to out buffer (no BubbleTea msg)
+//   - v2_runner_on_ok with stderr/stdout → warning log lines in ansibleEventMsg
+//   - v2_runner_on_failed / v2_runner_on_unreachable → error log lines
+//   - v2_playbook_on_stats → recap log lines
+//   - EOF / pipe closed → ansibleEventMsg{eof: true}
 //
-// vsh_stdout is written to the shared buffer directly rather than going
-// through the BubbleTea message queue. This avoids a race where tea.Quit
-// (sent on success in CLI mode) can arrive before the ansibleOutputMsg is
-// processed, silently dropping the captured table content.
-//
-// All other events (play_start, skipped, stats, etc.) are consumed silently.
+// vsh_stdout is written to the shared buffer directly (bypassing BubbleTea)
+// so that tea.Quit cannot race ahead of buffer writes in CLI success mode.
 // Reads byte-by-byte so no bytes are lost between successive goroutine calls.
 func readTaskCmd(r io.Reader, out *bytes.Buffer) tea.Cmd {
 	if r == nil {
@@ -790,30 +680,47 @@ func readTaskCmd(r io.Reader, out *bytes.Buffer) tea.Cmd {
 				}
 			}
 			if err != nil {
-				return ansibleTaskMsg("")
+				return ansibleEventMsg{eof: true}
 			}
 		}
 	}
 }
 
-// ansibleJSONEvent is the minimal schema for ansible.posix.jsonl output lines.
-// Each line is a complete JSON object with an _event field that identifies the
-// Ansible callback hook that fired.
+// ansibleHostResult holds the per-host fields we extract from jsonl events.
+type ansibleHostResult struct {
+	VshStdout   string          `json:"vsh_stdout"`
+	Msg         string          `json:"msg"`
+	Stderr      string          `json:"stderr"`
+	Stdout      string          `json:"stdout"`
+	Failed      bool            `json:"failed"`
+	Unreachable bool            `json:"unreachable"`
+	RC          int             `json:"rc"`
+	Cmd         json.RawMessage `json:"cmd"`
+}
+
+// ansibleJSONEvent is the schema for ansible.posix.jsonl output lines.
+// Each line is a complete JSON object with an _event field identifying the hook.
 type ansibleJSONEvent struct {
 	Event string `json:"_event"`
 	Task  struct {
 		Name string `json:"name"`
 	} `json:"task"`
-	// Hosts maps hostname → task result. We only need vsh_stdout from localhost.
-	Hosts map[string]struct {
-		VshStdout string `json:"vsh_stdout"`
-	} `json:"hosts"`
+	Hosts map[string]ansibleHostResult `json:"hosts"`
+	// Stats is populated for v2_playbook_on_stats events.
+	Stats map[string]struct {
+		Ok          int `json:"ok"`
+		Failures    int `json:"failures"`
+		Unreachable int `json:"unreachable"`
+		Changed     int `json:"changed"`
+		Skipped     int `json:"skipped"`
+	} `json:"stats"`
 }
 
-// parseJSONEvent parses a single jsonl line. For task-start events it returns
-// an ansibleTaskMsg. For v2_runner_on_ok events with vsh_stdout it writes the
-// content directly to out and returns nil (continues reading without a BubbleTea
-// round-trip). Returns nil for all other events or on parse errors.
+// parseJSONEvent parses a single jsonl line and returns an ansibleEventMsg,
+// or nil to continue reading without a BubbleTea round-trip.
+//
+// vsh_stdout content is written directly to out (bypasses BubbleTea queue).
+// All other displayable content is returned in ansibleEventMsg.logLines.
 func parseJSONEvent(line []byte, out *bytes.Buffer) tea.Msg {
 	if len(line) == 0 || line[0] != '{' {
 		return nil
@@ -822,97 +729,166 @@ func parseJSONEvent(line []byte, out *bytes.Buffer) tea.Msg {
 	if err := json.Unmarshal(line, &ev); err != nil {
 		return nil
 	}
+
 	switch ev.Event {
 	case "v2_playbook_on_task_start", "v2_runner_on_start":
 		name := strings.TrimSpace(ev.Task.Name)
-		if name != "" {
-			return ansibleTaskMsg(shortTaskName(name))
+		if name == "" {
+			return nil
 		}
+		taskLine := taskLogPrefix + name + "] " + strings.Repeat("*", 20)
+		// Meta-tasks (include_tasks, import_tasks, etc.) are logged but do not
+		// update the spinner — they execute instantly and the real work happens
+		// in the included file.
+		if isMetaTask(name) {
+			return ansibleEventMsg{logLines: []string{taskLine}}
+		}
+		return ansibleEventMsg{
+			taskName: shortTaskName(name),
+			logLines: []string{taskLine},
+		}
+
 	case "v2_runner_on_ok":
-		if out != nil {
-			for _, result := range ev.Hosts {
-				if result.VshStdout != "" {
-					if out.Len() > 0 {
-						out.WriteByte('\n')
-					}
-					out.WriteString(result.VshStdout)
+		var logLines []string
+		for _, result := range ev.Hosts {
+			// vsh_stdout goes directly to the shared buffer (bypasses BubbleTea).
+			if result.VshStdout != "" && out != nil {
+				if out.Len() > 0 {
+					out.WriteByte('\n')
 				}
+				out.WriteString(result.VshStdout)
+			}
+			// stderr / stdout on ok = warnings — show in log.
+			logLines = append(logLines, formatWarningLines(ev.Task.Name, result)...)
+		}
+		if len(logLines) > 0 {
+			return ansibleEventMsg{logLines: logLines}
+		}
+		return nil
+
+	case "v2_runner_on_failed":
+		var logLines []string
+		for _, result := range ev.Hosts {
+			logLines = append(logLines, formatFailureLines(ev.Task.Name, result)...)
+		}
+		if len(logLines) > 0 {
+			return ansibleEventMsg{logLines: logLines}
+		}
+		return nil
+
+	case "v2_runner_on_unreachable":
+		var logLines []string
+		for _, result := range ev.Hosts {
+			logLines = append(logLines, "UNREACHABLE ["+ev.Task.Name+"]")
+			if result.Msg != "" {
+				logLines = append(logLines, "  msg: "+result.Msg)
 			}
 		}
+		if len(logLines) > 0 {
+			return ansibleEventMsg{logLines: logLines}
+		}
+		return nil
+
+	case "v2_playbook_on_stats":
+		var logLines []string
+		logLines = append(logLines, strings.Repeat("─", 60))
+		logLines = append(logLines, "PLAY RECAP")
+		for host, s := range ev.Stats {
+			logLines = append(logLines, fmt.Sprintf(
+				"  %-20s ok=%-4d changed=%-4d failed=%-4d unreachable=%-4d skipped=%-4d",
+				host, s.Ok, s.Changed, s.Failures, s.Unreachable, s.Skipped,
+			))
+		}
+		return ansibleEventMsg{logLines: logLines}
 	}
+
 	return nil
+}
+
+// formatWarningLines builds log lines for a successful task that emitted
+// stderr or stdout (i.e. warnings from the module).
+func formatWarningLines(taskName string, r ansibleHostResult) []string {
+	stderr := strings.TrimSpace(r.Stderr)
+	stdout := strings.TrimSpace(r.Stdout)
+	if stderr == "" && stdout == "" {
+		return nil
+	}
+	var lines []string
+	lines = append(lines, "WARNING ["+taskName+"]")
+	if stderr != "" {
+		lines = append(lines, "  stderr:")
+		for _, l := range strings.Split(stderr, "\n") {
+			lines = append(lines, "    "+l)
+		}
+	}
+	if stdout != "" {
+		lines = append(lines, "  stdout:")
+		for _, l := range strings.Split(stdout, "\n") {
+			lines = append(lines, "    "+l)
+		}
+	}
+	return lines
+}
+
+// formatFailureLines builds the detailed error block for a failed task.
+// Includes msg, rc, cmd, stderr, and stdout so developers can diagnose
+// failures (e.g. composer errors) without leaving the TUI.
+func formatFailureLines(taskName string, r ansibleHostResult) []string {
+	var lines []string
+	lines = append(lines, "FAILED ["+taskName+"]")
+	if r.Msg != "" {
+		lines = append(lines, "  msg: "+r.Msg)
+	}
+	if r.RC != 0 {
+		lines = append(lines, fmt.Sprintf("  rc:  %d", r.RC))
+	}
+	if cmd := formatCmd(r.Cmd); cmd != "" {
+		lines = append(lines, "  cmd: "+cmd)
+	}
+	if stderr := strings.TrimSpace(r.Stderr); stderr != "" {
+		lines = append(lines, "  stderr:")
+		for _, l := range strings.Split(stderr, "\n") {
+			lines = append(lines, "    "+l)
+		}
+	}
+	if stdout := strings.TrimSpace(r.Stdout); stdout != "" {
+		lines = append(lines, "  stdout:")
+		for _, l := range strings.Split(stdout, "\n") {
+			lines = append(lines, "    "+l)
+		}
+	}
+	return lines
+}
+
+// formatCmd renders the cmd field (string or []string) as a single string.
+func formatCmd(raw json.RawMessage) string {
+	if len(raw) == 0 {
+		return ""
+	}
+	var s string
+	if err := json.Unmarshal(raw, &s); err == nil {
+		return s
+	}
+	var arr []string
+	if err := json.Unmarshal(raw, &arr); err == nil {
+		return strings.Join(arr, " ")
+	}
+	return string(raw)
 }
 
 // parseLogTaskName extracts the task name from a log line like:
 // "TASK [role-name : task-name] ****..."
-// Only called from appendLine/appendLines after verifying the line starts with "TASK [".
-// Returns the task name part (role-name : task-name) or empty string if no brackets found.
+// Returns the part between brackets, or empty string if not found.
 func parseLogTaskName(line string) string {
-	// Line format: "TASK [role-name : task-name] ****..."
-	// Find opening bracket
 	start := strings.Index(line, "[")
 	if start == -1 {
 		return ""
 	}
-	// Find closing bracket
 	end := strings.Index(line, "]")
 	if end == -1 || end <= start {
 		return ""
 	}
-	// Extract the part between brackets and trim whitespace
-	taskName := strings.TrimSpace(line[start+1 : end])
-	return taskName
-}
-
-// loadLogCmd reads up to logViewMaxLines from the end of the log file
-// and delivers a logViewReadyMsg. Runs inside a tea.Cmd goroutine so the
-// file read never blocks the render loop.
-func loadLogCmd() tea.Cmd {
-	return func() tea.Msg {
-		lines, err := tailFile(logPath, logViewMaxLines)
-		if err != nil {
-			return logViewReadyMsg{lines: []string{
-				"(could not read log: " + err.Error() + ")",
-			}}
-		}
-		return logViewReadyMsg{lines: lines}
-	}
-}
-
-// tailFile reads up to maxLines from the end of the file at path using a
-// ring buffer — single O(n) pass, O(maxLines) memory, no backward seeking.
-func tailFile(path string, maxLines int) ([]string, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		return nil, err
-	}
-	defer func() { _ = f.Close() }()
-
-	ring := make([]string, maxLines)
-	pos, count := 0, 0
-
-	scanner := bufio.NewScanner(f)
-	for scanner.Scan() {
-		ring[pos%maxLines] = scanner.Text()
-		pos++
-		count++
-	}
-	if err := scanner.Err(); err != nil {
-		return nil, err
-	}
-
-	if count <= maxLines {
-		result := make([]string, count)
-		copy(result, ring[:count])
-		return result, nil
-	}
-
-	// Reassemble in chronological order (oldest → newest).
-	start := pos % maxLines
-	result := make([]string, maxLines)
-	copy(result, ring[start:])
-	copy(result[maxLines-start:], ring[:start])
-	return result, nil
+	return strings.TrimSpace(line[start+1 : end])
 }
 
 // execViewportHeight calculates the live-log viewport height.

@@ -19,8 +19,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 
@@ -175,55 +173,50 @@ func TestExecModelTaskCounting(t *testing.T) {
 	}
 }
 
-func TestTailFile(t *testing.T) {
-	dir := t.TempDir()
-
-	// Test reading fewer lines than max.
-	path := makeTempLogFile(dir, []string{"line1", "line2", "line3"})
-	lines, err := tailFile(path, 10)
-	if err != nil {
-		t.Fatalf("tailFile failed: %v", err)
+func TestOpenLogViewerCmdWithLines(t *testing.T) {
+	lines := []string{"line1", "line2", "line3"}
+	cmd := openLogViewerCmd(lines)
+	if cmd == nil {
+		t.Fatal("expected non-nil cmd")
 	}
-	if len(lines) != 3 {
-		t.Errorf("expected 3 lines, got %d", len(lines))
+	msg := cmd()
+	ready, ok := msg.(logViewReadyMsg)
+	if !ok {
+		t.Fatalf("expected logViewReadyMsg, got %T", msg)
 	}
-
-	// Test reading from a file larger than max.
-	longLines := makeLines(100)
-	path = makeTempLogFile(dir, longLines)
-	lines, err = tailFile(path, 50)
-	if err != nil {
-		t.Fatalf("tailFile failed: %v", err)
+	if len(ready.lines) != 3 {
+		t.Errorf("expected 3 lines, got %d", len(ready.lines))
 	}
-	if len(lines) != 50 {
-		t.Errorf("expected 50 lines (max), got %d", len(lines))
-	}
-	// Verify we got the last 50 lines in order.
-	if lines[0] != "line 51" {
-		t.Errorf("expected first line to be 'line 51', got %s", lines[0])
-	}
-	if lines[49] != "line 100" {
-		t.Errorf("expected last line to be 'line 100', got %s", lines[49])
+	if ready.lines[0] != "line1" {
+		t.Errorf("expected first line 'line1', got %q", ready.lines[0])
 	}
 }
 
-func TestTailFileEmpty(t *testing.T) {
-	dir := t.TempDir()
-	path := makeTempLogFile(dir, nil)
-
-	lines, err := tailFile(path, 10)
-	if err != nil {
-		t.Fatalf("tailFile failed on empty file: %v", err)
+func TestOpenLogViewerCmdEmpty(t *testing.T) {
+	// When no lines accumulated, should return a placeholder message.
+	cmd := openLogViewerCmd(nil)
+	msg := cmd()
+	ready, ok := msg.(logViewReadyMsg)
+	if !ok {
+		t.Fatalf("expected logViewReadyMsg, got %T", msg)
 	}
-	if len(lines) != 0 {
-		t.Errorf("expected 0 lines for empty file, got %d", len(lines))
+	if len(ready.lines) == 0 {
+		t.Error("expected fallback message, got empty lines")
 	}
 }
 
-func TestTailFileMissing(t *testing.T) {
-	_, err := tailFile("/nonexistent/path/debug.log", 10)
-	if err == nil {
-		t.Error("expected error for missing file")
+func TestLogLinesAccumulation(t *testing.T) {
+	m := NewExecModel("install", "1.0.0", false, nil, nil, nil, nil, 0, 80, 24)
+
+	m.appendLine("TASK [Gathering Facts] ****")
+	m.appendLine("ok: [localhost]")
+	m.appendLines([]string{"TASK [Install deps] ****", "changed: [localhost]"})
+
+	if len(m.logLines) != 4 {
+		t.Errorf("expected 4 logLines, got %d", len(m.logLines))
+	}
+	if m.logLines[0] != "TASK [Gathering Facts] ****" {
+		t.Errorf("unexpected first logLine: %q", m.logLines[0])
 	}
 }
 
@@ -310,18 +303,6 @@ func TestExecModelProgressBarView(t *testing.T) {
 	}
 }
 
-func makeTempLogFile(dir string, lines []string) string {
-	path := filepath.Join(dir, "debug.log")
-	content := strings.Join(lines, "\n")
-	if len(lines) > 0 {
-		content += "\n"
-	}
-	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
-		panic(fmt.Sprintf("writing temp log: %v", err))
-	}
-	return path
-}
-
 func makeLines(n int) []string {
 	lines := make([]string, n)
 	for i := range lines {
@@ -332,22 +313,26 @@ func makeLines(n int) []string {
 
 func TestParseJSONEvent(t *testing.T) {
 	tests := []struct {
-		name     string
-		line     string
-		wantType string // "task", "output", or "nil"
-		wantVal  string
+		name          string
+		line          string
+		wantType      string // "task", "output", "loglines", or "nil"
+		wantVal       string // expected taskName (for "task") or buffer content (for "output")
+		wantLogLines  int    // minimum number of log lines expected (for "loglines" and "task")
+		wantLogContains string // substring expected in joined log lines
 	}{
 		{
-			name:     "task start (lockstep strategy)",
-			line:     `{"_event":"v2_playbook_on_task_start","task":{"name":"Gathering Facts","id":"abc"},"_timestamp":"2025-01-01T00:00:00Z"}`,
-			wantType: "task",
-			wantVal:  "Gathering Facts",
+			name:         "task start (lockstep strategy)",
+			line:         `{"_event":"v2_playbook_on_task_start","task":{"name":"Gathering Facts","id":"abc"},"_timestamp":"2025-01-01T00:00:00Z"}`,
+			wantType:     "task",
+			wantVal:      "Gathering Facts",
+			wantLogLines: 1,
 		},
 		{
-			name:     "task start (free strategy)",
-			line:     `{"_event":"v2_runner_on_start","task":{"name":"Install packages","id":"xyz"},"_timestamp":"2025-01-01T00:00:00Z"}`,
-			wantType: "task",
-			wantVal:  "Install packages",
+			name:         "task start (free strategy)",
+			line:         `{"_event":"v2_runner_on_start","task":{"name":"Install packages","id":"xyz"},"_timestamp":"2025-01-01T00:00:00Z"}`,
+			wantType:     "task",
+			wantVal:      "Install packages",
+			wantLogLines: 1,
 		},
 		{
 			name:     "runner ok with vsh_stdout",
@@ -356,18 +341,34 @@ func TestParseJSONEvent(t *testing.T) {
 			wantVal:  "service  status\nphp83    running",
 		},
 		{
-			name:     "runner ok without vsh_stdout",
+			name:     "runner ok without vsh_stdout or warnings",
 			line:     `{"_event":"v2_runner_on_ok","task":{"name":"install package"},"hosts":{"localhost":{"changed":false}},"_timestamp":"2025-01-01T00:00:00Z"}`,
 			wantType: "nil",
 		},
 		{
-			name:     "play start is ignored",
-			line:     `{"_event":"v2_playbook_on_play_start","play":{"name":"service","id":"123"},"_timestamp":"2025-01-01T00:00:00Z"}`,
-			wantType: "nil",
+			name:            "runner ok with stderr warning",
+			line:            `{"_event":"v2_runner_on_ok","task":{"name":"run script"},"hosts":{"localhost":{"changed":false,"stderr":"some warning"}},"_timestamp":"2025-01-01T00:00:00Z"}`,
+			wantType:        "loglines",
+			wantLogLines:    1,
+			wantLogContains: "WARNING",
 		},
 		{
-			name:     "stats event is ignored",
-			line:     `{"_event":"v2_playbook_on_stats","stats":{"localhost":{"ok":5,"failures":0}},"_timestamp":"2025-01-01T00:00:00Z"}`,
+			name:            "runner failed with msg and stderr",
+			line:            `{"_event":"v2_runner_on_failed","task":{"name":"composer install"},"hosts":{"localhost":{"failed":true,"msg":"non-zero return code","rc":1,"stderr":"Problem 1\n  - missing ext-soap","cmd":"composer install"}},"_timestamp":"2025-01-01T00:00:00Z"}`,
+			wantType:        "loglines",
+			wantLogLines:    3,
+			wantLogContains: "FAILED",
+		},
+		{
+			name:            "stats event produces recap",
+			line:            `{"_event":"v2_playbook_on_stats","stats":{"localhost":{"ok":5,"failures":1,"unreachable":0,"changed":2,"skipped":0}},"_timestamp":"2025-01-01T00:00:00Z"}`,
+			wantType:        "loglines",
+			wantLogLines:    3,
+			wantLogContains: "PLAY RECAP",
+		},
+		{
+			name:     "play start is ignored",
+			line:     `{"_event":"v2_playbook_on_play_start","play":{"name":"service","id":"123"},"_timestamp":"2025-01-01T00:00:00Z"}`,
 			wantType: "nil",
 		},
 		{
@@ -381,10 +382,11 @@ func TestParseJSONEvent(t *testing.T) {
 			wantType: "nil",
 		},
 		{
-			name:     "task name is shortened",
-			line:     `{"_event":"v2_playbook_on_task_start","task":{"name":"some-role : gather info | check conditions"},"_timestamp":"2025-01-01T00:00:00Z"}`,
-			wantType: "task",
-			wantVal:  "check conditions",
+			name:         "task name is shortened",
+			line:         `{"_event":"v2_playbook_on_task_start","task":{"name":"some-role : gather info | check conditions"},"_timestamp":"2025-01-01T00:00:00Z"}`,
+			wantType:     "task",
+			wantVal:      "check conditions",
+			wantLogLines: 1,
 		},
 	}
 
@@ -394,12 +396,15 @@ func TestParseJSONEvent(t *testing.T) {
 			msg := parseJSONEvent([]byte(tc.line), &buf)
 			switch tc.wantType {
 			case "task":
-				tm, ok := msg.(ansibleTaskMsg)
+				ev, ok := msg.(ansibleEventMsg)
 				if !ok {
-					t.Fatalf("expected ansibleTaskMsg, got %T", msg)
+					t.Fatalf("expected ansibleEventMsg, got %T", msg)
 				}
-				if string(tm) != tc.wantVal {
-					t.Errorf("task name: got %q, want %q", string(tm), tc.wantVal)
+				if ev.taskName != tc.wantVal {
+					t.Errorf("task name: got %q, want %q", ev.taskName, tc.wantVal)
+				}
+				if len(ev.logLines) < tc.wantLogLines {
+					t.Errorf("expected at least %d logLines, got %d", tc.wantLogLines, len(ev.logLines))
 				}
 			case "output":
 				// vsh_stdout is written directly to the buffer, not returned as a msg.
@@ -408,6 +413,20 @@ func TestParseJSONEvent(t *testing.T) {
 				}
 				if buf.String() != tc.wantVal {
 					t.Errorf("output buffer: got %q, want %q", buf.String(), tc.wantVal)
+				}
+			case "loglines":
+				ev, ok := msg.(ansibleEventMsg)
+				if !ok {
+					t.Fatalf("expected ansibleEventMsg for loglines, got %T", msg)
+				}
+				if len(ev.logLines) < tc.wantLogLines {
+					t.Errorf("expected at least %d logLines, got %d: %v", tc.wantLogLines, len(ev.logLines), ev.logLines)
+				}
+				if tc.wantLogContains != "" {
+					joined := strings.Join(ev.logLines, "\n")
+					if !strings.Contains(joined, tc.wantLogContains) {
+						t.Errorf("expected %q in logLines, got: %s", tc.wantLogContains, joined)
+					}
 				}
 			case "nil":
 				if msg != nil {
@@ -495,12 +514,12 @@ func TestReadTaskCmdParsesJSONTaskStart(t *testing.T) {
 
 	msg := readTaskCmd(pr, nil)()
 
-	tm, ok := msg.(ansibleTaskMsg)
+	ev, ok := msg.(ansibleEventMsg)
 	if !ok {
-		t.Fatalf("expected ansibleTaskMsg, got %T", msg)
+		t.Fatalf("expected ansibleEventMsg, got %T", msg)
 	}
-	if string(tm) != "Gathering Facts" {
-		t.Errorf("expected %q, got %q", "Gathering Facts", string(tm))
+	if ev.taskName != "Gathering Facts" {
+		t.Errorf("expected %q, got %q", "Gathering Facts", ev.taskName)
 	}
 }
 
@@ -522,13 +541,13 @@ func TestReadTaskCmdWritesVshStdoutToBuffer(t *testing.T) {
 	msg := readTaskCmd(pr, &buf)()
 
 	// The vsh_stdout line should NOT produce a message — readTaskCmd continues.
-	// The task name line produces the message.
-	tm, ok := msg.(ansibleTaskMsg)
+	// The task name line produces the ansibleEventMsg.
+	ev, ok := msg.(ansibleEventMsg)
 	if !ok {
-		t.Fatalf("expected ansibleTaskMsg after vsh_stdout, got %T", msg)
+		t.Fatalf("expected ansibleEventMsg after vsh_stdout, got %T", msg)
 	}
-	if string(tm) != "done" {
-		t.Errorf("expected task name %q, got %q", "done", string(tm))
+	if ev.taskName != "done" {
+		t.Errorf("expected task name %q, got %q", "done", ev.taskName)
 	}
 	if buf.String() != "table content" {
 		t.Errorf("expected buffer %q, got %q", "table content", buf.String())
@@ -648,35 +667,35 @@ func TestShortTaskName(t *testing.T) {
 	}
 }
 
-func TestAppendLinesSkipsMetaTasks(t *testing.T) {
-	// Test that include_tasks doesn't update currentTask if a real task came before
-	m := NewExecModel("install", "1.0.0", false, nil, nil, nil, nil, 10, 80, 24)
+func TestParseJSONEventMetaTaskSkipsSpinner(t *testing.T) {
+	// Meta-tasks should produce a log line but must NOT update the spinner (taskName empty).
+	line := `{"_event":"v2_playbook_on_task_start","task":{"name":"some-role : include_tasks"},"_timestamp":"t"}`
+	var buf bytes.Buffer
+	msg := parseJSONEvent([]byte(line), &buf)
 
-	// First, set a real task
-	m.appendLine("TASK [some-role : ensure service is started] ****")
-	realTask := m.currentTask
-	if realTask == "" {
-		t.Fatal("expected currentTask to be set to real task")
+	ev, ok := msg.(ansibleEventMsg)
+	if !ok {
+		t.Fatalf("expected ansibleEventMsg, got %T", msg)
+	}
+	if ev.taskName != "" {
+		t.Errorf("meta-task should not set taskName, got %q", ev.taskName)
+	}
+	if len(ev.logLines) == 0 {
+		t.Error("meta-task should still produce a log line")
 	}
 
-	// Then try to append include_tasks
-	m.appendLine("TASK [some-role : include_tasks] ****")
-
-	// currentTask should NOT change (still the real task)
-	if m.currentTask != realTask {
-		t.Errorf("currentTask changed from %q to %q when include_tasks was processed", realTask, m.currentTask)
+	// Real task must update taskName.
+	realLine := `{"_event":"v2_playbook_on_task_start","task":{"name":"some-role : ensure service is started"},"_timestamp":"t"}`
+	msg2 := parseJSONEvent([]byte(realLine), &buf)
+	ev2, ok := msg2.(ansibleEventMsg)
+	if !ok {
+		t.Fatalf("expected ansibleEventMsg for real task, got %T", msg2)
 	}
-
-	// Batch append with real task AFTER include_tasks
-	m.appendLines([]string{
-		"some output",
-		"TASK [some-role : include_tasks] ****",
-		"TASK [workflow : real work | do important thing] ****",
-	})
-
-	// currentTask should be the real task after include_tasks
-	if !strings.Contains(m.currentTask, "do important thing") {
-		t.Errorf("expected currentTask to be 'do important thing' task, got %q", m.currentTask)
+	if ev2.taskName == "" {
+		t.Error("real task should set taskName")
+	}
+	if !strings.Contains(ev2.taskName, "ensure service is started") {
+		t.Errorf("unexpected taskName: %q", ev2.taskName)
 	}
 }
 
@@ -769,12 +788,12 @@ func TestExecModelQuitAfterStdoutDrained(t *testing.T) {
 		t.Errorf("execDoneMsg should not return a cmd before stdout is drained, got %T", cmd2)
 	}
 
-	// Simulate ansibleTaskMsg("") — EOF from readTaskCmd (stdout fully drained).
-	_, cmd3 := em2.Update(ansibleTaskMsg(""))
+	// Simulate ansibleEventMsg{eof:true} — EOF from readTaskCmd (stdout fully drained).
+	_, cmd3 := em2.Update(ansibleEventMsg{eof: true})
 
 	// Now tea.Quit MUST be returned (CLI mode, no error, done=true).
 	if cmd3 == nil {
-		t.Error("ansibleTaskMsg('') after execDoneMsg should return tea.Quit cmd, got nil")
+		t.Error("ansibleEventMsg{eof:true} after execDoneMsg should return tea.Quit cmd, got nil")
 	}
 }
 
@@ -796,8 +815,8 @@ func TestExecModelNoQuitOnDoneWithoutEOF(t *testing.T) {
 		t.Errorf("execDoneMsg should not return a cmd before stdout is drained, got non-nil")
 	}
 
-	// Simulate a task message arriving while done=true (stdout still being read).
-	_, cmd2 := em.Update(ansibleTaskMsg("Gathering Facts"))
+	// Simulate an event arriving while done=true (stdout still being read).
+	_, cmd2 := em.Update(ansibleEventMsg{taskName: "Gathering Facts"})
 
 	// Should re-queue readTaskCmd (cmd2 non-nil), not quit.
 	if cmd2 == nil {
