@@ -173,6 +173,14 @@ func runExecPanel(command, version string, proc *exec.Cmd, ansibleOut io.Reader,
 		return err
 	}
 
+	// Check if the user requested to view the full log.
+	// If so, display it now with native terminal scrolling and selection support.
+	if fm, ok := final.(standaloneExecModel); ok {
+		if fm.execPanel.LogViewRequested() {
+			printLogView(fm.execPanel.LogLines())
+		}
+	}
+
 	// Print any vsh_stdout output now that BubbleTea has exited and the
 	// terminal is fully restored. A blank separator line is added before
 	// the output so it is visually distinct from the exec panel's last line.
@@ -286,4 +294,25 @@ func resolveRunOpts(root *cobra.Command, args []string) (*ansible.RunOpts, error
 		Opts:     opts,
 		WorkDir:  workDir,
 	}, nil
+}
+
+// printLogView displays the full execution log to stdout with a header and
+// divider line. Once BubbleTea has exited, the user can scroll the terminal
+// history and select text naturally.
+func printLogView(lines []string) {
+	fmt.Println()
+	fmt.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+	fmt.Println("Execution log:")
+	fmt.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+	fmt.Println()
+
+	if len(lines) == 0 {
+		fmt.Println("(no log output captured)")
+	} else {
+		for _, line := range lines {
+			fmt.Println(line)
+		}
+	}
+
+	fmt.Println()
 }
