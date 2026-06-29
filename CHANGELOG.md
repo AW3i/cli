@@ -9,6 +9,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Interactive Help System with `?` Keybinding
+
+#### Added
+
+**New `?` help keybinding in TUI launcher for discovering command usage without interrupting workflow.**
+
+The interactive TUI launcher now includes a dedicated help viewer accessible via the `?` key. This allows users to:
+- Explore command usage, description, and full help text from playbook annotations
+- Scroll through help content with vi-style (j/k) or arrow key navigation
+- Seamlessly transition from reading help to running the command with Enter
+- Close help and return to the command list with q/esc/? (toggle behavior)
+
+**Help View Features:**
+- Accessible from both the command list and inline argument box via `?` key
+- Display command usage, short description, and full help text
+- Fixed height (8 lines) prevents viewport jumping and keeps UI stable
+- Word-wrapped to terminal width with smart padding
+- Scrollable with `↑/↓`, `j/k`, `ctrl+u/d` keybindings
+- Enter opens the inline box for the current command (quick path to execution)
+- Toggle on/off with `?` (matches pager conventions like `less`, `man`)
+
+**UI/UX Improvements:**
+- Help bar now displays all available keybindings:
+  - List screen: `h/l` navigate · `/` filter · `?` help · `↵` select · `esc` back · `q` quit
+  - Inline box: `?` help · `↵` run · `ctrl+d/u` scroll docs · `esc` back
+  - Help view: `↑/↓` scroll · `j/k` vim scroll · `q/esc` close · `?` toggle · `enter` run
+- Fixed misleading "type to search" hint → now shows `/ filter` (accurate bubbles/list key)
+- Added screen state to state machine: `screenHelp` (read-only, scrollable help viewer)
+
+**Bug Fixes:**
+- Fixed last item display in narrow terminals (add -1 safety margin for ambiguous-width Unicode chars like ▶ in Nerd Fonts)
+- Fixed terminal viewport jumping when help opens (use fixed height instead of dynamic)
+- Fixed filter keybinding accuracy in help bar (show / not "type to search")
+
+**Code Changes:**
+- `internal/tui/launcher.go` — added `screenHelp` state, `openHelp()`, `handleHelpKey()`, `helpView()`, `helpViewMaxLines` constant (+140 lines)
+- `internal/tui/launcher_test.go` — added 8 new test cases for help view open/close/scroll/inline integration (+157 lines)
+- `internal/tui/list.go` — updated help bar keybinding hints, added -1 safety margin for ambiguous Unicode width (+10 lines)
+
+**Tests:** All 65 tests pass ✓
+
+---
+
 ### CLI Task Display: Real-Time Ansible Task Names in Execution Panel
 
 #### Fixed
