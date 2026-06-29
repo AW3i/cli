@@ -26,7 +26,7 @@ import (
 )
 
 func TestExecModelInit(t *testing.T) {
-	m := NewExecModel("service start php83", "1.0.0", false, nil, nil, nil, nil, 0, 80, 24)
+	m := NewExecModel("service start php83", "1.0.0", nil, nil, nil, nil, 0, 80, 24)
 	cmd := m.Init()
 	if cmd == nil {
 		t.Error("Init() should return a non-nil Cmd (tick + wait)")
@@ -34,7 +34,7 @@ func TestExecModelInit(t *testing.T) {
 }
 
 func TestExecModelDoneOnExecDoneMsg(t *testing.T) {
-	m := NewExecModel("install", "1.0.0", false, nil, nil, nil, nil, 0, 80, 24)
+	m := NewExecModel("install", "1.0.0", nil, nil, nil, nil, 0, 80, 24)
 
 	rm, _ := m.Update(execDoneMsg{err: nil})
 
@@ -51,7 +51,7 @@ func TestExecModelDoneOnExecDoneMsg(t *testing.T) {
 }
 
 func TestExecModelFailedExecDoneMsg(t *testing.T) {
-	m := NewExecModel("service start php83", "1.0.0", false, nil, nil, nil, nil, 0, 80, 24)
+	m := NewExecModel("service start php83", "1.0.0", nil, nil, nil, nil, 0, 80, 24)
 	sentinel := errors.New("exit status 1")
 
 	rm, _ := m.Update(execDoneMsg{err: sentinel})
@@ -69,7 +69,7 @@ func TestExecModelFailedExecDoneMsg(t *testing.T) {
 }
 
 func TestExecModelLogPromptYesOpensViewer(t *testing.T) {
-	m := NewExecModel("install", "1.0.0", false, nil, nil, nil, nil, 0, 80, 24)
+	m := NewExecModel("install", "1.0.0", nil, nil, nil, nil, 0, 80, 24)
 
 	// Trigger failure.
 	m, _ = m.Update(execDoneMsg{err: errors.New("exit status 1")})
@@ -91,7 +91,7 @@ func TestExecModelLogPromptYesOpensViewer(t *testing.T) {
 }
 
 func TestExecModelLogPromptEnterOpensViewer(t *testing.T) {
-	m := NewExecModel("install", "1.0.0", false, nil, nil, nil, nil, 0, 80, 24)
+	m := NewExecModel("install", "1.0.0", nil, nil, nil, nil, 0, 80, 24)
 	m, _ = m.Update(execDoneMsg{err: errors.New("exit status 1")})
 
 	// Any other key triggers the prompt; then Enter confirms.
@@ -109,7 +109,7 @@ func TestExecModelLogPromptEnterOpensViewer(t *testing.T) {
 }
 
 func TestExecModelLogPromptNoQuits(t *testing.T) {
-	m := NewExecModel("install", "1.0.0", false, nil, nil, nil, nil, 0, 80, 24)
+	m := NewExecModel("install", "1.0.0", nil, nil, nil, nil, 0, 80, 24)
 	m, _ = m.Update(execDoneMsg{err: errors.New("exit status 1")})
 
 	// Show prompt with any neutral key, then press N.
@@ -124,7 +124,7 @@ func TestExecModelLogPromptNoQuits(t *testing.T) {
 }
 
 func TestExecModelLogPromptEscQuits(t *testing.T) {
-	m := NewExecModel("install", "1.0.0", false, nil, nil, nil, nil, 0, 80, 24)
+	m := NewExecModel("install", "1.0.0", nil, nil, nil, nil, 0, 80, 24)
 	m, _ = m.Update(execDoneMsg{err: errors.New("exit status 1")})
 
 	_, cmd := m.Update(tea.KeyPressMsg{Text: "esc"})
@@ -133,19 +133,7 @@ func TestExecModelLogPromptEscQuits(t *testing.T) {
 	}
 }
 
-func TestExecModelViewportHeight(t *testing.T) {
-	// Normal footer — expect height minus header and 2-line footer.
-	h := execViewportHeight(24, false)
-	if h != 20 {
-		t.Errorf("expected height 20, got %d", h)
-	}
 
-	// Prompt footer — extra line for prompt.
-	hPrompt := execViewportHeight(24, true)
-	if hPrompt != 19 {
-		t.Errorf("expected height 19 with prompt, got %d", hPrompt)
-	}
-}
 
 func TestExecModelLogViewerViewportHeight(t *testing.T) {
 	h := logViewerViewportHeight(24)
@@ -155,7 +143,7 @@ func TestExecModelLogViewerViewportHeight(t *testing.T) {
 }
 
 func TestExecModelTaskCounting(t *testing.T) {
-	m := NewExecModel("install", "1.0.0", false, nil, nil, nil, nil, 10, 80, 24)
+	m := NewExecModel("install", "1.0.0", nil, nil, nil, nil, 10, 80, 24)
 
 	// Simulate task lines appearing in the log.
 	m.appendLine("TASK [Gathering Facts]")
@@ -206,7 +194,7 @@ func TestOpenLogViewerCmdEmpty(t *testing.T) {
 }
 
 func TestLogLinesAccumulation(t *testing.T) {
-	m := NewExecModel("install", "1.0.0", false, nil, nil, nil, nil, 0, 80, 24)
+	m := NewExecModel("install", "1.0.0", nil, nil, nil, nil, 0, 80, 24)
 
 	m.appendLine("TASK [Gathering Facts] ****")
 	m.appendLine("ok: [localhost]")
@@ -238,7 +226,7 @@ func TestExecModelProgressBarRendering(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			m := NewExecModel("install", "1.0.0", false, nil, nil, nil, nil, tc.totalTasks, 80, 24)
+			m := NewExecModel("install", "1.0.0", nil, nil, nil, nil, tc.totalTasks, 80, 24)
 			m.tasksDone = tc.tasksDone
 			m.done = tc.done
 			m.err = tc.err
@@ -269,7 +257,7 @@ func TestExecModelRenderProgressBarCalculations(t *testing.T) {
 
 	for _, tc := range tasks {
 		t.Run(fmt.Sprintf("%d_of_%d", tc.tasksDone, tc.totalTasks), func(t *testing.T) {
-			m := NewExecModel("install", "1.0.0", false, nil, nil, nil, nil, tc.totalTasks, 80, 24)
+			m := NewExecModel("install", "1.0.0", nil, nil, nil, nil, tc.totalTasks, 80, 24)
 			m.tasksDone = tc.tasksDone
 			m.currentTask = tc.task
 
@@ -284,7 +272,7 @@ func TestExecModelRenderProgressBarCalculations(t *testing.T) {
 
 func TestExecModelProgressBarView(t *testing.T) {
 	// While running: should show spinner + task name (shortened).
-	m := NewExecModel("install", "1.0.0", false, nil, nil, nil, nil, 20, 80, 24)
+	m := NewExecModel("install", "1.0.0", nil, nil, nil, nil, 20, 80, 24)
 	m.tasksDone = 10
 	m.currentTask = "some : task name"
 
@@ -773,7 +761,7 @@ func TestIsJSONTaskStart(t *testing.T) {
 // — ensuring vsh_stdout has been fully written to the output buffer before
 // p.Run() returns.
 func TestExecModelQuitAfterStdoutDrained(t *testing.T) {
-	m := NewExecModel("service list", "1.0.0", false, nil, nil, nil, nil, 0, 80, 24)
+	m := NewExecModel("service list", "1.0.0", nil, nil, nil, nil, 0, 80, 24)
 	m.done = false
 
 	// Simulate execDoneMsg arriving (process exited, success).
@@ -802,7 +790,7 @@ func TestExecModelQuitAfterStdoutDrained(t *testing.T) {
 func TestExecModelNoQuitOnDoneWithoutEOF(t *testing.T) {
 	// Use a real (blocking) pipe so readTaskCmd is re-queued rather than returning nil.
 	pr, _ := io.Pipe()
-	m := NewExecModel("service list", "1.0.0", false, nil, pr, nil, nil, 0, 80, 24)
+	m := NewExecModel("service list", "1.0.0", nil, pr, nil, nil, 0, 80, 24)
 
 	// execDoneMsg: should mark done but NOT quit.
 	em, cmd := m.Update(execDoneMsg{err: nil})
