@@ -83,17 +83,9 @@ type model struct {
 	width  int
 	height int
 
-	// helpLines are the wrapped lines of help text shown in the help view.
-	helpLines []string
-
-	// helpOffset is the scroll position (0-indexed line) in helpLines.
-	helpOffset int
-
-	// helpTitle is the command path shown in the help view header, e.g. "valet.sh init-instance".
-	helpTitle string
-
-	// helpCmd is the cobra command being viewed; used to trigger inline box on Enter.
-	helpCmd CommandItem
+	// help holds the state for the help view screen (screenHelp).
+	// Only meaningful when activeScreen == screenHelp.
+	help helpState
 }
 
 // Result is returned by Run() after the TUI exits.
@@ -369,120 +361,6 @@ func (m model) popStack() (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// openHelp opens the help view for the selected command.
-func (m model) openHelp() (tea.Model, tea.Cmd) {
-	sel, ok := m.commandList.SelectedItem().(CommandItem)
-	if !ok {
-		return m, nil
-	}
-
-	// Only show help for leaf commands.
-	if sel.IsBack || sel.HasSubCommands() {
-		return m, nil
-	}
-
-	// Build help content: Usage + description + full help text.
-	var helpText strings.Builder
-	if sel.Cmd.Use != "" {
-		helpText.WriteString("Usage: " + sel.Cmd.Use + "\n\n")
-	}
-	if sel.Cmd.Short != "" {
-		helpText.WriteString(sel.Cmd.Short + "\n\n")
-	}
-	if sel.Cmd.Long != "" {
-		helpText.WriteString(sel.Cmd.Long)
-	}
-
-	// Word-wrap to terminal width, leaving 2-character margin.
-	wrapped := wordWrap(helpText.String(), m.width-2)
-	helpLines := strings.Split(wrapped, "\n")
-
-	m.helpTitle = m.fullCommandPath(sel.Title())
-	m.helpLines = helpLines
-	m.helpOffset = 0
-	m.helpCmd = sel
-	m.activeScreen = screenHelp
-	return m, nil
-}
-
-// handleHelpKey handles key events in the help view.
-func (m model) handleHelpKey(key string, msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
-	maxScroll := len(m.helpLines) - (m.height - 6) // 6 lines for header, divider, footer
-	if maxScroll < 0 {
-		maxScroll = 0
-	}
-
-	switch key {
-	case "j", "down", "ctrl+d":
-		// Scroll down
-		if m.helpOffset < maxScroll {
-			m.helpOffset++
-		}
-		return m, nil
-
-	case "k", "up", "ctrl+u":
-		// Scroll up
-		if m.helpOffset > 0 {
-			m.helpOffset--
-		}
-		return m, nil
-
-	case "q", "esc", "?":
-		// Close help, return to list (? toggles help off)
-		m.activeScreen = screenList
-		return m, nil
-
-	case "enter":
-		// Close help and open inline box for this command
-		m.activeScreen = screenList
-		// Simulate selectItem for the currently selected command
-		path := m.fullCommandPath(m.helpCmd.Title())
-		docs := m.helpCmd.LongDescription()
-		box := NewInlineBox(path, docs, m.inlineBoxWidth())
-		m.inlineBox = &box
-		m.activeScreen = screenInline
-		return m, nil
-	}
-
-	return m, nil
-}
-
-// helpView renders the full help screen with scrollable content.
-func (m model) helpView() string {
-	var output strings.Builder
-
-	_, _ = fmt.Fprintln(&output, m.headerView())
-	_, _ = fmt.Fprintln(&output, dividerLine(m.width))
-
-	// Use fixed height to prevent viewport jumps when opening help.
-	contentHeight := helpViewMaxLines
-
-	// Slice the visible portion of helpLines based on scroll offset.
-	endLine := m.helpOffset + contentHeight
-	if endLine > len(m.helpLines) {
-		endLine = len(m.helpLines)
-	}
-
-	visibleLines := m.helpLines[m.helpOffset:endLine]
-	for _, line := range visibleLines {
-		_, _ = fmt.Fprintln(&output, "  "+line)
-	}
-
-	// Pad with blank lines if we're not at the end.
-	for len(visibleLines) < contentHeight {
-		_, _ = fmt.Fprintln(&output)
-		visibleLines = append(visibleLines, "")
-	}
-
-	_, _ = fmt.Fprintln(&output, dividerLine(m.width))
-
-	// Footer with navigation hints.
-	footer := "  ↑/↓ scroll   j/k vim scroll   q/esc close   enter run"
-	_, _ = fmt.Fprint(&output, footer)
-
-	return output.String()
-}
-
 // routeMsg forwards non-key messages to the active component.
 func (m model) routeMsg(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmd tea.Cmd
@@ -591,10 +469,6 @@ func (m model) headerView() string {
 
 // --- Layout helpers -------------------------------------------------------------
 
-func dividerLine(width int) string {
-	return strings.Repeat("─", width)
-}
-
 // inlineBoxWidth returns the width for the inline box — full terminal width.
 func (m model) inlineBoxWidth() int {
 	return m.width
@@ -620,32 +494,4 @@ func (m model) commandPathFromStack() string {
 		return ""
 	}
 	return m.fullCommandPath(sel.Title())
-}
-
-// wordWrap breaks text at word boundaries to fit within maxWidth columns.
-func wordWrap(text string, maxWidth int) string {
-	if maxWidth <= 0 {
-		return text
-	}
-	words := strings.Fields(text)
-	var lines []string
-	var current strings.Builder
-
-	for _, word := range words {
-		switch {
-		case current.Len() == 0:
-			current.WriteString(word)
-		case current.Len()+1+len(word) <= maxWidth:
-			current.WriteByte(' ')
-			current.WriteString(word)
-		default:
-			lines = append(lines, current.String())
-			current.Reset()
-			current.WriteString(word)
-		}
-	}
-	if current.Len() > 0 {
-		lines = append(lines, current.String())
-	}
-	return strings.Join(lines, "\n")
 }
