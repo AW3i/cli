@@ -15,6 +15,7 @@
 package tui
 
 import (
+	"fmt"
 	"testing"
 
 	"charm.land/bubbles/v2/list"
@@ -414,6 +415,162 @@ func TestItemsFromCommands(t *testing.T) {
 	back, ok := withBack[0].(CommandItem)
 	if !ok || !back.IsBack {
 		t.Error("expected first item to be back item")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Help View (? key)
+// ---------------------------------------------------------------------------
+
+func TestHelpKeyOpensHelpView(t *testing.T) {
+	root := testRoot()
+	m := newModel(root, "1.0.0", false)
+	m.width = 120
+	m.height = 40
+
+	// Press ? to open help for the selected command.
+	result, _ := m.Update(tea.KeyPressMsg{Text: "?"})
+	rm := result.(model)
+
+	if rm.activeScreen != screenHelp {
+		t.Errorf("expected screenHelp after ?, got %v", rm.activeScreen)
+	}
+	if len(rm.helpLines) == 0 {
+		t.Error("expected helpLines to be non-empty after opening help")
+	}
+	if rm.helpTitle == "" {
+		t.Error("expected helpTitle to be set")
+	}
+}
+
+func TestHelpKeyFromInlineBox(t *testing.T) {
+	root := testRoot()
+	m := newModel(root, "1.0.0", false)
+	m.width = 120
+	m.height = 40
+
+	// Open inline box first.
+	result, _ := m.Update(tea.KeyPressMsg{Text: "enter"})
+	rm := result.(model)
+	if rm.activeScreen != screenInline {
+		t.Skip("inline box did not open")
+	}
+
+	// ? in inline box should close the box and open help for the same command.
+	result2, _ := rm.Update(tea.KeyPressMsg{Text: "?"})
+	rm2 := result2.(model)
+
+	if rm2.activeScreen != screenHelp {
+		t.Errorf("? in inline box should open help, got screen %v", rm2.activeScreen)
+	}
+	if rm2.inlineBox != nil {
+		t.Error("expected inline box to be closed after ? key")
+	}
+}
+
+func TestHelpViewClosesWithEsc(t *testing.T) {
+	root := testRoot()
+	m := newModel(root, "1.0.0", false)
+	m.width = 120
+	m.height = 40
+
+	// Open help view.
+	result, _ := m.Update(tea.KeyPressMsg{Text: "?"})
+	rm := result.(model)
+	if rm.activeScreen != screenHelp {
+		t.Skip("help view did not open")
+	}
+
+	// Close with Esc.
+	result2, _ := rm.Update(tea.KeyPressMsg{Text: "esc"})
+	rm2 := result2.(model)
+
+	if rm2.activeScreen != screenList {
+		t.Errorf("expected screenList after Esc from help, got %v", rm2.activeScreen)
+	}
+}
+
+func TestHelpViewClosesWithQ(t *testing.T) {
+	root := testRoot()
+	m := newModel(root, "1.0.0", false)
+	m.width = 120
+	m.height = 40
+
+	// Open help view.
+	result, _ := m.Update(tea.KeyPressMsg{Text: "?"})
+	rm := result.(model)
+	if rm.activeScreen != screenHelp {
+		t.Skip("help view did not open")
+	}
+
+	// Close with Q.
+	result2, _ := rm.Update(tea.KeyPressMsg{Text: "q"})
+	rm2 := result2.(model)
+
+	if rm2.activeScreen != screenList {
+		t.Errorf("expected screenList after Q from help, got %v", rm2.activeScreen)
+	}
+}
+
+func TestHelpViewScrollDownWithJ(t *testing.T) {
+	root := testRoot()
+	m := newModel(root, "1.0.0", false)
+	m.width = 120
+	m.height = 10
+
+	// Open help view.
+	result, _ := m.Update(tea.KeyPressMsg{Text: "?"})
+	rm := result.(model)
+	if rm.activeScreen != screenHelp {
+		t.Skip("help view did not open")
+	}
+
+	// Manually populate helpLines with many lines to allow scrolling.
+	for i := 0; i < 100; i++ {
+		rm.helpLines = append(rm.helpLines, "Line "+fmt.Sprintf("%d", i))
+	}
+
+	initialOffset := rm.helpOffset
+
+	// Scroll down with J.
+	result2, _ := rm.Update(tea.KeyPressMsg{Text: "j"})
+	rm2 := result2.(model)
+
+	if rm2.helpOffset <= initialOffset {
+		t.Errorf("expected helpOffset to increase with J, got %d (was %d)", rm2.helpOffset, initialOffset)
+	}
+}
+
+func TestHelpViewScrollUpWithK(t *testing.T) {
+	root := testRoot()
+	m := newModel(root, "1.0.0", false)
+	m.width = 120
+	m.height = 10
+
+	// Open help view.
+	result, _ := m.Update(tea.KeyPressMsg{Text: "?"})
+	rm := result.(model)
+	if rm.activeScreen != screenHelp {
+		t.Skip("help view did not open")
+	}
+
+	// Manually populate helpLines with many lines to allow scrolling.
+	for i := 0; i < 100; i++ {
+		rm.helpLines = append(rm.helpLines, "Line "+fmt.Sprintf("%d", i))
+	}
+
+	// Scroll down first.
+	result2, _ := rm.Update(tea.KeyPressMsg{Text: "j"})
+	rm2 := result2.(model)
+
+	offsetAfterDown := rm2.helpOffset
+
+	// Scroll up with K.
+	result3, _ := rm2.Update(tea.KeyPressMsg{Text: "k"})
+	rm3 := result3.(model)
+
+	if rm3.helpOffset >= offsetAfterDown {
+		t.Errorf("expected helpOffset to decrease with K, got %d (was %d)", rm3.helpOffset, offsetAfterDown)
 	}
 }
 
