@@ -14,6 +14,8 @@
 #   limitations under the License.
 ##
 
+version: 2
+
 run:
   timeout: 5m
   go: '1.22'
@@ -21,8 +23,6 @@ run:
   tests: true
 
 output:
-  formats:
-    - format: colored-line-number
   print-issued-lines: true
   print-linter-name: true
 
@@ -65,32 +65,18 @@ linters-settings:
 linters:
   disable-all: true
   enable:
-    # Critical linters
+    # Default critical linters (always enabled)
     - errcheck
-    - gosec
-    - gocritic
     - govet
     - ineffassign
     - staticcheck
     - unused
-    # Code quality
+    # Additional security/quality
+    - gosec
+    - gocritic
     - bodyclose
     - dogsled
-    - gosimple
-    - unconvert
     - unparam
-    - whitespace
-    # Formatting
-    - gofmt
-    # Disabled for now - can enable gradually:
-    # - goimports  # Disabled - requires running goimports tool which isn't available in all environments
-    # - dupl       # duplicate code detection (too strict for now)
-    # - lll        # line length limit (120 chars too strict)
-    # - misspell   # spelling (false positives with UK spelling)
-    # - mnd        # magic numbers (too strict for CLI tools)
-    # - revive     # style checks (many trivial issues)
-    # - stylecheck # package comments (not critical)
-    # - depguard   # import restrictions (misconfigured)
 
 issues:
   exclude-files:
