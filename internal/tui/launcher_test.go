@@ -435,11 +435,11 @@ func TestHelpKeyOpensHelpView(t *testing.T) {
 	if rm.activeScreen != screenHelp {
 		t.Errorf("expected screenHelp after ?, got %v", rm.activeScreen)
 	}
-	if len(rm.helpLines) == 0 {
-		t.Error("expected helpLines to be non-empty after opening help")
+	if len(rm.help.lines) == 0 {
+		t.Error("expected help.lines to be non-empty after opening help")
 	}
-	if rm.helpTitle == "" {
-		t.Error("expected helpTitle to be set")
+	if rm.help.title == "" {
+		t.Error("expected help.title to be set")
 	}
 }
 
@@ -525,19 +525,19 @@ func TestHelpViewScrollDownWithJ(t *testing.T) {
 		t.Skip("help view did not open")
 	}
 
-	// Manually populate helpLines with many lines to allow scrolling.
+	// Manually populate help.lines with many lines to allow scrolling.
 	for i := 0; i < 100; i++ {
-		rm.helpLines = append(rm.helpLines, "Line "+fmt.Sprintf("%d", i))
+		rm.help.lines = append(rm.help.lines, "Line "+fmt.Sprintf("%d", i))
 	}
 
-	initialOffset := rm.helpOffset
+	initialOffset := rm.help.offset
 
 	// Scroll down with J.
 	result2, _ := rm.Update(tea.KeyPressMsg{Text: "j"})
 	rm2 := result2.(model)
 
-	if rm2.helpOffset <= initialOffset {
-		t.Errorf("expected helpOffset to increase with J, got %d (was %d)", rm2.helpOffset, initialOffset)
+	if rm2.help.offset <= initialOffset {
+		t.Errorf("expected help.offset to increase with J, got %d (was %d)", rm2.help.offset, initialOffset)
 	}
 }
 
@@ -554,23 +554,23 @@ func TestHelpViewScrollUpWithK(t *testing.T) {
 		t.Skip("help view did not open")
 	}
 
-	// Manually populate helpLines with many lines to allow scrolling.
+	// Manually populate help.lines with many lines to allow scrolling.
 	for i := 0; i < 100; i++ {
-		rm.helpLines = append(rm.helpLines, "Line "+fmt.Sprintf("%d", i))
+		rm.help.lines = append(rm.help.lines, "Line "+fmt.Sprintf("%d", i))
 	}
 
 	// Scroll down first.
 	result2, _ := rm.Update(tea.KeyPressMsg{Text: "j"})
 	rm2 := result2.(model)
 
-	offsetAfterDown := rm2.helpOffset
+	offsetAfterDown := rm2.help.offset
 
 	// Scroll up with K.
 	result3, _ := rm2.Update(tea.KeyPressMsg{Text: "k"})
 	rm3 := result3.(model)
 
-	if rm3.helpOffset >= offsetAfterDown {
-		t.Errorf("expected helpOffset to decrease with K, got %d (was %d)", rm3.helpOffset, offsetAfterDown)
+	if rm3.help.offset >= offsetAfterDown {
+		t.Errorf("expected help.offset to decrease with K, got %d (was %d)", rm3.help.offset, offsetAfterDown)
 	}
 }
 
