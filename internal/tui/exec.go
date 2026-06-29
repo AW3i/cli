@@ -479,9 +479,6 @@ func (e ExecModel) IsDone() bool { return e.done }
 // Err returns the subprocess exit error, if any.
 func (e ExecModel) Err() error { return e.err }
 
-// LogViewOpen returns true when the full-screen log viewer is currently open.
-func (e ExecModel) LogViewOpen() bool { return e.logViewOpen }
-
 // copyToClipboardOSC52 copies the given text to the system clipboard using the
 // OSC 52 escape sequence. This works in modern terminals like iTerm2, Kitty,
 // WezTerm, Alacritty, and tmux (with set-clipboard on). If the terminal doesn't

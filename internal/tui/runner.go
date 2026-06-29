@@ -240,13 +240,7 @@ func (standalone standaloneExecModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (standalone standaloneExecModel) View() tea.View {
-	v := tea.NewView(standalone.execPanel.View())
-	// Enable mouse mode during execution (doesn't matter much, just a spinner).
-	// Disable it in the log viewer so users can select text with the mouse naturally.
-	if !standalone.execPanel.LogViewOpen() {
-		v.MouseMode = tea.MouseModeCellMotion
-	}
-	return v
+	return tea.NewView(standalone.execPanel.View())
 }
 
 // resolveRunOpts walks the cobra command tree to find the matching command
