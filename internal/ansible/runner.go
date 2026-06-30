@@ -44,10 +44,11 @@ type CLIVars struct {
 // ExtraVars is the top-level extra-vars object passed to ansible-playbook.
 type ExtraVars struct {
 	CLI CLIVars `json:"cli"`
-	// WorkDir is the user's current working directory at the time valet.sh was
-	// invoked. Ansible playbooks read this via lookup('env','OLDPWD') today;
-	// we pass it explicitly so the Go wrapper doesn't need the OLDPWD trick.
-	WorkDir string `json:"valet_current_path,omitempty"`
+	// valet_current_path is NOT passed as an extra-var. The playbook reads it
+	// from the OLDPWD environment variable (set in setEnv below). Passing it as
+	// an extra-var would give it Ansible's highest precedence (22), preventing
+	// the playbook's set_fact calls from dynamically adjusting the path based
+	// on instance.path in .valet-sh.yml. See link.yml:66-72 and load-valet-sh-file.yml:37.
 }
 
 // RunOpts configures a single ansible-playbook invocation.
@@ -90,7 +91,6 @@ func Run(opts *RunOpts) error {
 			Args: opts.Args,
 			Opts: opts.Opts,
 		},
-		WorkDir: workDir,
 	}
 	if extraVars.CLI.Args == nil {
 		extraVars.CLI.Args = []string{}
@@ -176,7 +176,6 @@ func RunSubprocess(opts *RunOpts) (*exec.Cmd, io.Reader, func(), error) {
 			Args: opts.Args,
 			Opts: opts.Opts,
 		},
-		WorkDir: workDir,
 	}
 	if extraVars.CLI.Args == nil {
 		extraVars.CLI.Args = []string{}
@@ -195,7 +194,7 @@ func RunSubprocess(opts *RunOpts) (*exec.Cmd, io.Reader, func(), error) {
 
 	// Write extra-vars to a temp file so they do not appear in the process
 	// list (ps aux). The file contains only non-sensitive routing data
-	// (cli.args, cli.opts, valet_current_path).
+	// (cli.args, cli.opts).
 	evFile, err := os.CreateTemp("", "valetsh-vars-*")
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("creating extra-vars file: %w", err)
@@ -281,7 +280,6 @@ func ListTasks(opts *RunOpts) int {
 			Args: opts.Args,
 			Opts: opts.Opts,
 		},
-		WorkDir: workDir,
 	}
 	if extraVars.CLI.Args == nil {
 		extraVars.CLI.Args = []string{}

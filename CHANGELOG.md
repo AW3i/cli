@@ -52,50 +52,70 @@ The interactive TUI launcher now includes a dedicated help viewer accessible via
 
 ---
 
-### CLI Task Display: Real-Time Ansible Task Names in Execution Panel
+### Refactored TUI Package into Focused Modules
 
-#### Fixed
+#### Changed
 
-**Task names now display in real time as Ansible moves from task to task.**
+**Improved code organization and maintainability by splitting monolithic exec.go and launcher.go into single-responsibility modules.**
+
+The TUI package grew to ~1,200 lines spread across `exec.go` (756 lines) and `launcher.go` (651 lines), mixing concerns like JSON parsing, error formatting, help UI logic, and screen routing.
+
+**Refactoring split the code into focused modules:**
+- **`ansible_events.go`** (~250 lines) — Ansible JSON schema, `parseJSONEvent()`, error/warning formatters (`formatFailureLines()`, `formatWarningLines()`), task identification (`isMetaTask()`, `shortTaskName()`)
+- **`help.go`** (~140 lines) — Help UI state and behavior: `helpState` sub-struct, `openHelp()`, `handleHelpKey()`, `helpView()` rendering
+- **`layout.go`** (~40 lines) — Pure terminal layout utilities: `dividerLine()`, `wordWrap()`
+
+**Benefits:**
+- **Clear separation of concerns** — JSON parsing logic separate from UI rendering; help system in its own module
+- **Improved readability** — `exec.go` now 503 lines (-34%), `launcher.go` 497 lines (-26%)
+- **Model field reduction** — `launcher.go` dropped from 14 to 10 model fields by grouping help-related fields into `helpState` sub-struct
+- **Sub-struct pattern** — `type helpState struct {...}` scales well for adding future screens (settings, filters, etc.) without bloating the main model
+- **Testability** — JSON parsing and formatting logic is isolated and independently testable
+- **Zero regressions** — All 65 tests pass; binary builds cleanly
+
+**Code changes:**
+- New `internal/tui/ansible_events.go` — Ansible JSON schema and event parsing (~250 lines)
+- New `internal/tui/help.go` — Interactive help viewer module (~140 lines)
+- New `internal/tui/layout.go` — Terminal layout utilities (~40 lines)
+- Refactored `internal/tui/exec.go` — removed JSON parsing, reduced from 756 → 503 lines
+- Refactored `internal/tui/launcher.go` — removed help logic, reduced from 651 → 497 lines
+
+**Commits:**
+- `febcc50` — Refactor TUI into focused modules (ansible_events, help, layout)
+- `3f11a9a` — Update CHANGELOG with refactoring summary
+- `8549bfc` — Update README.md documentation
+
+---
+
+### CLI Task Display: Real-Time Ansible Task Names in Execution Panel (Superseded by JSON Streaming)
+
+#### Context
+
+This entry describes an intermediate implementation that used custom Python callback plugin output and braille spinner detection. It has since been **completely replaced** by the `ansible.posix.jsonl` callback and structured JSON event streaming (see **Refactored TUI Package** above).
+
+#### Original Problem (Now Solved Differently)
 
 The execution panel spinner was showing stale task names (all tasks arrived at once at process exit, or not at all for long-running operations). The root cause was Python's stdout buffering behavior when connected to a pipe.
 
-**The Problem:**
+**Original approach:**
+- Relied on custom `valet-sh.py` callback plugin outputting ANSI-colored spinner characters
+- Braille prefix detection (`\xe2\xa0`) to identify first task and unblock BubbleTea
+- Task names extracted from spinner output using byte-pattern matching
 
-- Ansible's callback plugin (`/usr/local/valet-sh/valet-sh/plugins/callback/valet-sh.py`) writes task names using `print(..., end="\r")` to stdout
-- When stdout is a pipe (not a TTY), Python uses **full buffering** by default — the 8 KB buffer holds task name writes
-- Without explicit `sys.stdout.flush()` in the callback plugin, task names sit in the buffer until:
-  - The buffer fills (rare, after ~100 tasks)
-  - The process exits (common case — all task names arrive at once at the very end)
-- Result: task display showed nothing for minutes, then suddenly all tasks at once, or was completely stale for long operations
+#### Current Solution (JSON Streaming)
 
-**The Solution:**
+The problem is now solved by using the official `ansible.posix.jsonl` callback plugin:
+- Ansible emits structured JSON events directly to stdout (one per line)
+- `readTaskCmd()` parses JSON lines containing `v2_playbook_on_task_start` events
+- Task names come from the clean JSON `data.task_name` field (no pattern matching needed)
+- The gate waits for the first JSON task event instead of braille spinner detection
+- Error details (stderr, rc, cmd) are now part of the structured event, displayed directly in the TUI
 
-Set `PYTHONUNBUFFERED=1` in the Ansible subprocess environment (`cli/internal/ansible/runner.go:248`). This forces Python to use **line buffering** for stdout when connected to a pipe, ensuring each `print()` call goes to the pipe immediately.
+**See:** `internal/tui/ansible_events.go` for current JSON parsing implementation.
 
-**Effect:**
-- Each task arrival now generates a separate read from the stdout pipe in real time
-- The Go goroutine `readTaskCmd()` receives `"\x1b[2K\r⠙ taskname\r"` (flush + spinner + task) immediately
-- Progress bar updates instantly as Ansible moves to each new task
-- Display naturally reflects what Ansible is currently executing
-
-**Code changes:**
-- `cli/internal/ansible/runner.go` — added `"PYTHONUNBUFFERED=1"` to subprocess environment (1-line fix)
-- `cli/internal/tui/exec.go` — defensive improvements to task name parsing:
-  - `readTaskCmd()` internal loop: only return on IO error/EOF, not on empty parse results (avoids spurious EOF from flush-only reads)
-  - `parseAnsibleTaskLine()` added spinner rune validation: only accept lines starting with known braille spinner characters (`⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏`), preventing play-start lines from being misidentified
-- `cli/internal/tui/exec_test.go` — expanded test coverage with 7 cases for `parseAnsibleTaskLine` and flush-only line handling
-
-**Commits:**
-- `360c34c` — Stream task names from ansible stdout pipe (had buffering issue)
-- `6af1c41` — Previous log-file-based approach (was working)
-- Latest — `PYTHONUNBUFFERED=1` fix + defensive parsing improvements (**current**)
-
-**Testing:**
-- All unit tests pass
-- Real-world verification pending: run `valet service start` or `valet init-instance` to confirm task display updates correctly
-
-See [docs/architecture.md - CLI Task Display: Real-Time Streaming](docs/architecture.md#cli-task-display-real-time-streaming) for detailed design documentation.
+**Old file references (no longer relevant):**
+- Old: `cli/internal/ansible/runner.go`
+- Current: `internal/ansible/runner.go` (part of unified valet-sh-cli repo)
 
 ---
 
@@ -119,18 +139,6 @@ Fixed the "View full log?" prompt interaction to open log viewer with a single k
 - Consistent with natural user expectation: "I want to see the log" → single action
 
 ---
-
-### Technical Details
-
-**Files modified:**
-- `cli/internal/ansible/runner.go` — added `PYTHONUNBUFFERED=1` to subprocess environment
-- `cli/internal/tui/exec.go` — improved `readTaskCmd` loop and `parseAnsibleTaskLine` validation
-- `cli/internal/tui/exec_test.go` — expanded test coverage for task parsing
-
-**Testing:**
-- Build: successful, no compilation errors
-- All unit tests pass
-- Changes are in `cli` subdirectory with its own `go.mod`
 
 ---
 
