@@ -72,10 +72,12 @@ No Go code needs to be written or modified.
 |---|---|
 | `launcher.go` | Navigation + help system: command bar, inline box, help viewer, quits with `Result.Args` on Enter |
 | `list.go` | `CommandItem` (list.Item), custom delegate, arg parsing from cobra `Use`, keybinding hints |
-| `args.go` | Argument input pane (`bubbles/textinput` per arg) |
-| `exec.go` | `ExecModel`: live log panel, JSON event streaming, log viewer on failure |
-| `runner.go` | `RunWithPanel()` entry point, `waitForFirstTask()` gate, `standaloneExecModel` |
 | `inline.go` | Inline command box (arg input + docs display, ctrl+d/u scrolling) |
+| `exec.go` | `ExecModel`: live execution panel, JSON event streaming, log viewer on failure |
+| `runner.go` | `RunWithPanel()` entry point, `waitForFirstJSONTask()` gate, `standaloneExecModel` |
+| `ansible_events.go` | Ansible JSON schema, event parsing, error/warning formatting, task name shortening |
+| `help.go` | Interactive help viewer: `helpState` sub-struct, open/close/scroll behavior |
+| `layout.go` | Terminal layout utilities: `dividerLine()`, `wordWrap()` |
 | `styles.go` | Lip Gloss styles matching the Ansible callback colour palette |
 
 **Screen state machine:**
@@ -114,7 +116,7 @@ The help view uses a fixed height (8 lines) to prevent viewport jumping when ope
 | Path | Used when | Mechanism |
 |---|---|---|
 | `ansible.Run()` | Non-TTY / direct cobra dispatch | `syscall.Exec` — replaces current process |
-| `ansible.RunSubprocess()` | TUI panel | `exec.Cmd.Start()` — Go stays alive for log tailing |
+| `ansible.RunSubprocess()` | TUI panel | `exec.Cmd.Start()` — Go stays alive for JSON event streaming and TUI rendering |
 
 ---
 
@@ -128,45 +130,38 @@ natively via its own prompt mechanism.
 
 `RunSubprocess` passes `cmd.Stdin = os.Stdin` to the Ansible subprocess.
 When the playbook starts, Ansible's `vars_prompt` prompts for the password on
-the raw terminal. Go gates BubbleTea startup on `waitForFirstTask()`.
+the raw terminal. Go gates BubbleTea startup on `waitForFirstJSONTask()`.
 
-#### The startup gate (`waitForFirstTask`)
+#### The startup gate (`waitForFirstJSONTask`)
 
-The valet-sh callback plugin (`plugins/callback/valet-sh.py`) writes to the
-subprocess's stdout in this order:
+The Ansible playbook uses the official `ansible.posix.jsonl` callback plugin, which
+emits structured JSON events to stdout in this order:
 
 ```
-1. \033[?25h          — CURSOR_SHOW, at module import (first byte 0x1B)
-2. ▶ play-name\n      — v2_playbook_on_play_start, before vars_prompt
-3.                    — vars_prompt fires here; Ansible reads password from stdin
-4. ⠙ task-name\r      — v2_playbook_on_task_start, first task starts
+1. v2_playbook_on_play_start    — fires BEFORE vars_prompt
+2.                               — vars_prompt fires here; Ansible reads password from stdin
+3. v2_playbook_on_task_start    — first task starts (first JSON event containing task info)
 ```
 
-`waitForFirstTask()` reads the stdout pipe byte-by-byte, buffering everything,
-until it detects the 2-byte UTF-8 prefix `\xe2\xa0` — which uniquely
-identifies a Braille spinner character (U+2800..U+28FF). This prefix only
-appears at step 4, guaranteeing that `vars_prompt` (step 3) has completed and
-stdin is free before BubbleTea takes over.
+`waitForFirstJSONTask()` reads the stdout pipe line-by-line, buffering all JSON events,
+until it detects an event with `"event": "v2_playbook_on_task_start"`. This JSON 
+structure only appears after the first real task starts (step 3), guaranteeing that 
+`vars_prompt` (step 2) has completed and stdin is free before BubbleTea takes over.
 
-**Why `\xe2\xa0` and not just `\xe2`?**
+**JSON event detection:**
 
-Both the spinner characters and the play-start `▶` (U+25B6) start with `\xe2`.
-The spinner chars (U+2800..U+28FF) all have `\xe2\xa0` as their first two
-bytes, while `▶` encodes as `\xe2\x96\xb6` (second byte `0x96`). Checking two
-bytes avoids triggering the gate on the play-start line.
-
-| Character | Codepoint | UTF-8 | Triggers gate? |
-|---|---|---|---|
-| `⠙` (spinner) | U+2819 | `\xe2\xa0\x99` | Yes |
-| `▶` (play-start) | U+25B6 | `\xe2\x96\xb6` | No |
-| ESC (CURSOR_SHOW) | — | `\x1b...` | No |
+The gate scans for the literal JSON substring `"v2_playbook_on_task_start"` within each
+line. This is unambiguous:
+- `v2_playbook_on_play_start` events come before the password prompt
+- `v2_playbook_on_task_start` is the first task-level event, guaranteed after password entry
+- If parsing fails, the gate waits for the next line (no false positives)
 
 All bytes consumed while waiting are returned via `io.MultiReader` so the exec
 panel receives the complete, unmodified stdout stream.
 
 **If Ansible exits before any task** (e.g. syntax error, missing playbook),
-the stdout pipe closes. `waitForFirstTask` returns the buffered bytes and
-`runExecPanel` starts immediately, receiving `execDoneMsg` with the error.
+the stdout pipe closes. `waitForFirstJSONTask()` returns the buffered bytes and
+`runExecPanel()` starts immediately, receiving `execDoneMsg` with the error.
 
 #### TUI launcher path
 
@@ -174,7 +169,7 @@ The launcher is navigation-only. On Enter, it stores `selectedArgs` and returns
 `tea.Quit`. `tui.Run()` returns `Result{Args: selectedArgs}`. `main.go` then
 calls `RunWithPanel(root, result.Args, Version)` on the clean terminal after
 BubbleTea has torn down — so `vars_prompt` fires on the raw terminal, then the
-exec panel BubbleTea starts after `waitForFirstTask` unblocks.
+exec panel BubbleTea starts after `waitForFirstJSONTask()` unblocks.
 
 ---
 
@@ -187,13 +182,14 @@ exec panel BubbleTea starts after `waitForFirstTask` unblocks.
    `ansible-playbook`, Go process vanishes from the process table. Used when
    stdout is not a TTY.
 
-3. **`RunSubprocess` for TUI** — Go stays alive to tail `debug.log` and render
-   the scrollable execution panel while Ansible runs.
+3. **`RunSubprocess` for TUI** — Go stays alive to stream JSON events from Ansible
+   and render the execution panel with real-time task updates and structured error details.
 
 4. **Ansible owns the password** — `ansible_become_pass` is never collected,
    stored, or passed by Go. `vars_prompt` in the playbook handles it natively
-   via the raw terminal. `waitForFirstTask()` gates BubbleTea startup on the
-   first spinner character so stdin is free during the password prompt.
+   via the raw terminal. `waitForFirstJSONTask()` gates BubbleTea startup on the
+   first `v2_playbook_on_task_start` JSON event, ensuring stdin is free during the
+   password prompt.
 
 5. **No `//nolint` comments** — use `.golangci.yml` exclusions with an
    explanation.
@@ -342,9 +338,7 @@ All commands follow the same runtime pattern:
 | `internal/commands/helpers.go` | `errcheck` | `cmd.Help()` stdout errors are non-critical |
 | `internal/updater/check.go` | `errcheck` | File close and HTTP body close are best-effort |
 | `internal/tui/` | `gocritic/hugeParam` | Bubble Tea requires value receivers — intentional by design |
-| `internal/tui/exec.go` | `errcheck` | Best-effort file/viewport operations |
 | `internal/tui/runner.go` | `errcheck` | Best-effort workdir lookup |
-| `internal/tui/exec.go` | `gosec/G304` | `tailFile()` always receives the hardcoded `logPath` constant |
 | All | `gosec/G204` | `syscall.Exec` with trusted argv is intentional |
 
 ---
@@ -352,11 +346,10 @@ All commands follow the same runtime pattern:
 ## Security Notes
 
 - `syscall.Exec` argv is constructed from platform constants + cobra-parsed args
-- `tailFile()` path is always the hardcoded `logPath` constant, not user input
 - `go.sum` pins exact SHA-256 hashes for all Go module dependencies
 - Ansible's `ansible_become_pass` is never collected or stored by Go;
   `vars_prompt` in the playbook prompts natively on the raw terminal
-- `waitForFirstTask()` gates BubbleTea on `\xe2\xa0` (Braille spinner prefix),
+- `waitForFirstJSONTask()` gates BubbleTea on JSON event detection,
   ensuring stdin is free before BubbleTea takes ownership
 
 ---

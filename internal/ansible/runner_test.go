@@ -133,13 +133,15 @@ Playbook without indentation should be skipped`,
 // TestExtraVarsJSON verifies that ExtraVars marshals correctly to JSON.
 // ansible_become_pass must never appear in the extra-vars JSON — Ansible's
 // own vars_prompt handles the become password natively via stdin.
+// valet_current_path is not passed as extra-var; playbooks read it from the
+// OLDPWD environment variable, which allows set_fact to dynamically adjust
+// the path based on instance.path in .valet-sh.yml.
 func TestExtraVarsJSON(t *testing.T) {
 	ev := ExtraVars{
 		CLI: CLIVars{
 			Args: []string{"start", "mysql80"},
 			Opts: []string{},
 		},
-		WorkDir: "/home/user/project",
 	}
 
 	jsonBytes, err := json.Marshal(ev)
@@ -153,8 +155,14 @@ func TestExtraVarsJSON(t *testing.T) {
 	if !strings.Contains(jsonStr, `"cli"`) {
 		t.Error("JSON missing 'cli' key")
 	}
-	if !strings.Contains(jsonStr, `"valet_current_path"`) {
-		t.Error("JSON missing 'valet_current_path' key")
+
+	// valet_current_path must NOT be in extra-vars; playbooks read it from
+	// the OLDPWD environment variable. If it were in extra-vars (Ansible
+	// precedence level 22), it would prevent the playbook's set_fact calls
+	// (precedence level 19) from dynamically adjusting the path based on
+	// instance.path from .valet-sh.yml.
+	if strings.Contains(jsonStr, `"valet_current_path"`) {
+		t.Error("JSON must not contain 'valet_current_path': it blocks playbook set_fact path adjustments")
 	}
 
 	// The become password must never appear in extra-vars: Ansible's
