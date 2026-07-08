@@ -2,4 +2,4 @@
 .vagrant
 .vscode
 dist/
-coverage.out
+coverage.out.opencode/
