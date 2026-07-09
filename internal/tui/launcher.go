@@ -46,22 +46,11 @@ type stackEntry struct {
 // model is the root Bubble Tea model for the valet-sh launcher.
 // Elm architecture requires value receivers — do not use pointer receivers.
 type model struct {
-	// root cobra command — used only to read command metadata.
-	root *cobra.Command
-
-	// version string shown in the header.
+	root    *cobra.Command
 	version string
-
-	// vimMode enables hjkl navigation when true.
-	// Toggled by ctrl+[.
 	vimMode bool
 
-	// Navigation stack. stack[0] is always the root menu.
-	stack []stackEntry
-
-	// commandList is the bubbles/list model for the current level.
-	// Used for keyboard input handling (navigation, filtering) even though
-	// the display uses renderHorizontalList() instead of commandList.View().
+	stack       []stackEntry
 	commandList list.Model
 
 	// inlineBox is the unified arg-input + docs box shown when a command
@@ -183,12 +172,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 func (m model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	key := msg.String()
 
-	// ctrl+c always quits.
 	if key == "ctrl+c" {
 		return m, tea.Quit
 	}
 
-	// ctrl+[ toggles vim mode.
 	if key == "ctrl+[" {
 		m.vimMode = !m.vimMode
 		return m, nil
@@ -210,13 +197,10 @@ func (m model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 
 // handleListKey handles key events on the horizontal command list.
 func (m model) handleListKey(key string, msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
-	// q quits only when not filtering.
 	if key == "q" && m.commandList.FilterState() != list.Filtering {
 		return m, tea.Quit
 	}
 
-	// Navigation — translate to list cursor movements.
-	// Vim mode: h/l/j/k; normal mode: ←/→/↑/↓.
 	switch key {
 	case "left", "up":
 		m.commandList.CursorUp()
@@ -240,12 +224,10 @@ func (m model) handleListKey(key string, msg tea.KeyPressMsg) (tea.Model, tea.Cm
 	switch key {
 	case "esc":
 		if m.commandList.FilterState() == list.Filtering {
-			// Let list handle Esc to clear filter.
 		} else {
 			return m.popStack()
 		}
 	case "?":
-		// Show help for the selected command (if it's a leaf).
 		if m.commandList.FilterState() != list.Filtering {
 			return m.openHelp()
 		}
@@ -255,7 +237,6 @@ func (m model) handleListKey(key string, msg tea.KeyPressMsg) (tea.Model, tea.Cm
 		}
 	}
 
-	// Forward remaining keys to the list (handles filter input).
 	var cmd tea.Cmd
 	m.commandList, cmd = m.commandList.Update(msg)
 	m.stack[len(m.stack)-1].list = m.commandList
@@ -266,26 +247,19 @@ func (m model) handleListKey(key string, msg tea.KeyPressMsg) (tea.Model, tea.Cm
 func (m model) handleInlineKey(key string, msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	switch key {
 	case "?":
-		// Close inline box and show help for the selected command.
 		m.inlineBox = nil
 		m.activeScreen = screenList
 		return m.openHelp()
 
 	case "esc":
-		// Close inline box, return to list.
 		m.inlineBox = nil
 		m.activeScreen = screenList
 		return m, nil
 
 	case "enter":
-		// Collect the selected args, store them, and quit the launcher.
-		// The caller (main.go via Run()) reads selectedArgs and dispatches
-		// via RunWithPanel, which gates BubbleTea restart on Ansible's first
-		// task output — after any vars_prompt password input is done.
 		return m.executeCommand()
 	}
 
-	// Route to inline box for doc scrolling and text input.
 	if m.inlineBox != nil {
 		var cmd tea.Cmd
 		updated, cmd := m.inlineBox.Update(msg)
@@ -311,7 +285,6 @@ func (m model) selectItem() (tea.Model, tea.Cmd) {
 		return m.pushStack(sel)
 	}
 
-	// Open the inline box — always, so user can review docs and type args.
 	path := m.fullCommandPath(sel.Title())
 	docs := sel.LongDescription()
 	box := NewInlineBox(path, docs, m.inlineBoxWidth())
@@ -411,9 +384,7 @@ func (m model) render() string {
 	case m.activeScreen == screenHelp:
 		_, _ = fmt.Fprint(&output, m.helpView())
 	default:
-		// Show command list for screenList
 		_, _ = fmt.Fprintln(&output, renderHorizontalList(m.commandList, m.width))
-		// Show filter input line when actively filtering.
 		if m.commandList.FilterState() == list.Filtering {
 			_, _ = fmt.Fprintln(&output, "  "+m.commandList.FilterInput.View())
 		}
@@ -433,9 +404,6 @@ func (m model) headerView() string {
 
 	title := styles.Header.Render("▶ " + breadcrumb)
 
-	// Right side of the title — changes based on state:
-	// - screenInline:   show the live textinput ("valet.sh db █")
-	// - screenList:     show dim ghost text of the hovered command
 	var titleSuffix string
 	switch m.activeScreen {
 	case screenInline:
@@ -448,7 +416,6 @@ func (m model) headerView() string {
 		}
 	}
 
-	// Right side: [VIM] indicator (if active) · version.
 	vimIndicator := ""
 	if m.vimMode {
 		vimIndicator = styles.VimModeIndicator.Render("[VIM]") + "  "
@@ -456,7 +423,6 @@ func (m model) headerView() string {
 	versionLabel := styles.Version.Render("v" + m.version)
 	right := vimIndicator + versionLabel
 
-	// Pad to right edge.
 	leftLen := lipgloss.Width(title) + lipgloss.Width(titleSuffix)
 	rightLen := lipgloss.Width(right)
 	versionPadding := m.width - leftLen - rightLen - 1

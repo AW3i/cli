@@ -85,28 +85,23 @@ func (m model) handleHelpKey(key string, msg tea.KeyPressMsg) (tea.Model, tea.Cm
 
 	switch key {
 	case "j", "down", "ctrl+d":
-		// Scroll down
 		if m.help.offset < maxScroll {
 			m.help.offset++
 		}
 		return m, nil
 
 	case "k", "up", "ctrl+u":
-		// Scroll up
 		if m.help.offset > 0 {
 			m.help.offset--
 		}
 		return m, nil
 
 	case "q", "esc", "?":
-		// Close help, return to list
 		m.activeScreen = screenList
 		return m, nil
 
 	case "enter":
-		// Close help and open inline box for this command
 		m.activeScreen = screenList
-		// Simulate selectItem for the currently selected command
 		path := m.fullCommandPath(m.help.cmd.Title())
 		docs := m.help.cmd.LongDescription()
 		box := NewInlineBox(path, docs, m.inlineBoxWidth())
