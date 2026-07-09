@@ -31,34 +31,17 @@ import (
 	"github.com/valet-sh/cli/internal/platform"
 )
 
-// RunWithPanel executes a valet command via ansible-playbook and shows
-// the live execution panel (header + spinner + log tail).
-//
-// It resolves the ansible RunOpts from the cobra command tree using the
-// provided args slice (e.g. ["service", "start", "php83"]).
-//
-// Ansible's own vars_prompt handles the become-password prompt natively:
-// stdin is connected to the subprocess so the user types directly into
-// Ansible's prompt on the raw terminal. BubbleTea only takes over after
-// waitForFirstJSONTask() detects the first task-start JSON event from
-// ansible.posix.jsonl — which fires only after vars_prompt has completed
-// and tasks have begun — guaranteeing stdin is free before BubbleTea
-// takes ownership.
-//
-// When stdout is not a TTY (CI, pipes), it falls back to the normal
-// cobra/ansible path so non-interactive usage is never affected.
-//
-// Returns the ansible process exit error if the playbook failed, or nil.
+// RunWithPanel executes a valet command with a live TUI panel. It gates BubbleTea
+// startup on the first JSON task-start event, ensuring Ansible's vars_prompt
+// password input runs on the raw terminal. Non-TTY falls back to normal ansible.Run().
 func RunWithPanel(root *cobra.Command, args []string, version string) error {
 	if !IsTTY() {
-		// Non-interactive: delegate to cobra which calls ansible.Run (syscall.Exec).
 		os.Args = append([]string{os.Args[0]}, args...)
 		return root.Execute()
 	}
 
 	opts, err := resolveRunOpts(root, args)
 	if err != nil {
-		// Unknown command or bad args — let cobra print the error normally.
 		os.Args = append([]string{os.Args[0]}, args...)
 		return root.Execute()
 	}
@@ -68,34 +51,15 @@ func RunWithPanel(root *cobra.Command, args []string, version string) error {
 		return fmt.Errorf("starting ansible-playbook: %w", err)
 	}
 
-	// Gate BubbleTea startup on the first task-start JSON event from
-	// ansible.posix.jsonl. The jsonl callback emits play_start events
-	// before vars_prompt fires; task-start events only appear after
-	// vars_prompt has completed. All JSON lines consumed while waiting
-	// are buffered and replayed so readTaskCmd() receives the full stream.
 	taskOut := waitForFirstJSONTask(ansibleOut)
 
 	commandStr := strings.Join(args, " ")
 	return runExecPanel(commandStr, version, proc, taskOut, cleanup, 0)
 }
 
-// waitForFirstJSONTask reads ansible.posix.jsonl output line-by-line,
-// buffering everything, until it finds a v2_playbook_on_task_start or
-// v2_runner_on_start event. It then returns an io.Reader that replays
-// all consumed bytes (including the task-start line) followed by the
-// rest of the original reader.
-//
-// ansible.posix.jsonl emits events in this order per play:
-//
-//  1. v2_playbook_on_play_start → fires BEFORE vars_prompt
-//  2. vars_prompt fires here    → Ansible reads password from stdin
-//  3. v2_playbook_on_task_start → fires for each task AFTER vars_prompt
-//
-// Gating on the task-start event (step 3) ensures vars_prompt (step 2)
-// has completed and stdin is free before BubbleTea takes over.
-//
-// If the pipe closes before any task starts (e.g. playbook syntax error),
-// the buffered bytes are returned as-is so the exec panel shows the error.
+// waitForFirstJSONTask reads JSON lines until it finds a task-start event,
+// buffering everything and returning a reader that replays all bytes (including
+// the task-start line). This gates BubbleTea startup after vars_prompt completes.
 func waitForFirstJSONTask(r io.Reader) io.Reader {
 	var buf bytes.Buffer
 	var line []byte
@@ -164,33 +128,23 @@ func runExecPanel(command, version string, proc *exec.Cmd, ansibleOut io.Reader,
 	p := tea.NewProgram(m)
 	final, err := p.Run()
 
-	// Drain any pending terminal capability-query responses that BubbleTea
-	// left in stdin (e.g. DECRPM responses \x1b[?2026;2$y). Without this they
-	// appear as visual noise in the shell after the program exits.
 	drainStdin()
 
 	if err != nil {
 		return err
 	}
 
-	// Check if the user requested to view the full log.
-	// If so, display it now with native terminal scrolling and selection support.
 	if fm, ok := final.(standaloneExecModel); ok {
 		if fm.execPanel.LogViewRequested() {
 			printLogView(fm.execPanel.LogLines())
 		}
 	}
 
-	// Print any vsh_stdout output now that BubbleTea has exited and the
-	// terminal is fully restored. A blank separator line is added before
-	// the output so it is visually distinct from the exec panel's last line.
 	if outputBuf.Len() > 0 {
 		fmt.Println()
 		fmt.Println(outputBuf.String())
 	}
 
-	// When running with a custom repo path (VALET_REPO_DIR), print a brief
-	// notice so the developer knows which repo was used for this run.
 	if devDir := platform.DevRepoDir(); devDir != "" {
 		fmt.Fprintf(os.Stderr, "\n[dev] repo: %s\n", devDir)
 	}
@@ -201,31 +155,20 @@ func runExecPanel(command, version string, proc *exec.Cmd, ansibleOut io.Reader,
 	return nil
 }
 
-// drainStdin reads and discards any bytes that the terminal placed in stdin
-// as responses to BubbleTea's capability queries (e.g. Synchronized Output
-// DECRPM \x1b[?2026;2$y, Unicode Mode \x1b[?2027;0$y). These responses
-// sit in the terminal's input buffer after BubbleTea exits; without draining
-// them they appear as visual noise echoed by the shell.
-//
-// Uses O_NONBLOCK on the stdin file descriptor so the read returns immediately
-// with EAGAIN when no bytes are pending. This is POSIX-compliant and works on
-// both Linux and macOS (where TTY SetReadDeadline is unreliable).
+// drainStdin discards any terminal capability-query responses left in stdin
+// (e.g. DECRPM, Unicode Mode) that BubbleTea left behind, preventing visual noise.
 func drainStdin() {
 	fd := int(os.Stdin.Fd())
 
-	// Switch stdin to non-blocking mode. If this fails (e.g. stdin is not a
-	// real fd, or the OS denies it), bail out silently.
 	if err := syscall.SetNonblock(fd, true); err != nil {
 		return
 	}
-	// Restore blocking mode when done, regardless of what we read.
 	defer syscall.SetNonblock(fd, false) //nolint:errcheck
 
 	buf := make([]byte, 256)
 	for {
 		n, err := os.Stdin.Read(buf)
 		if n == 0 || err != nil {
-			// EAGAIN (no more bytes available) or any other error: done.
 			break
 		}
 	}
@@ -252,9 +195,7 @@ func (standalone standaloneExecModel) View() tea.View {
 }
 
 // resolveRunOpts walks the cobra command tree to find the matching command
-// for the given args and builds an ansible.RunOpts from it.
-// Separates positional arguments from flags: tokens starting with "-" go to Opts,
-// everything else goes to Args.
+// for the given args and builds an ansible.RunOpts, separating flags from positional args.
 func resolveRunOpts(root *cobra.Command, args []string) (*ansible.RunOpts, error) {
 	if len(args) == 0 {
 		return nil, fmt.Errorf("no command specified")
@@ -265,15 +206,11 @@ func resolveRunOpts(root *cobra.Command, args []string) (*ansible.RunOpts, error
 		return nil, fmt.Errorf("unknown command: %s", args[0])
 	}
 
-	// Prefer the canonical playbook name stored by discover.go in Annotations.
-	// Falls back to the first word of cmd.Use for commands not built via Discover
-	// (e.g. in tests).
 	playbook := cmd.Annotations["playbook"]
 	if playbook == "" {
 		playbook = strings.SplitN(cmd.Use, " ", 2)[0]
 	}
 
-	// Separate positional args from opts (flags starting with "-").
 	var positionalArgs, opts []string
 	for _, token := range remaining {
 		if strings.HasPrefix(token, "-") {

@@ -21,24 +21,14 @@ import (
 	"charm.land/lipgloss/v2"
 )
 
-// Colour palette — uses terminal palette indices (0–15) so the TUI adapts
-// to the user's terminal theme (Solarized, Dracula, Nord, etc.) rather than
-// hardcoding hex values that may clash.
+// Colour palette — uses terminal palette indices (0–15) to adapt to the user's
+// terminal theme (Solarized, Dracula, Nord, etc.) rather than hardcoding hex values.
 var (
-	// colourBlue — terminal bright blue (index 12), matches ansiBlue \033[1;34m.
-	colourBlue = lipgloss.Color("12")
-
-	// colourGreen — terminal bright green (index 10), matches ansiGreen \033[0;32m.
-	colourGreen = lipgloss.Color("10")
-
-	// colourRed — terminal bright red (index 9), matches ansiRed \033[1;31m.
-	colourRed = lipgloss.Color("9")
-
-	// colourDim — terminal bright black / dark grey (index 8).
-	colourDim = lipgloss.Color("8")
-
-	// colourText — terminal normal foreground (index 7).
-	colourText = lipgloss.Color("7")
+	colourBlue  = lipgloss.Color("12") // bright blue (matches \033[1;34m)
+	colourGreen = lipgloss.Color("10") // bright green (matches \033[0;32m)
+	colourRed   = lipgloss.Color("9")  // bright red (matches \033[1;31m)
+	colourDim   = lipgloss.Color("8")  // dark grey
+	colourText  = lipgloss.Color("7")  // normal foreground
 )
 
 // styles holds all Lip Gloss styles used by the TUI, initialised once and
@@ -46,36 +36,29 @@ var (
 var styles = newStyles()
 
 type tuiStyles struct {
-	// Header
 	Header           lipgloss.Style
 	Version          lipgloss.Style
 	VimModeIndicator lipgloss.Style
 	GhostCommand     lipgloss.Style
 
-	// Horizontal command bar
 	CommandSelected   lipgloss.Style
 	CommandNormal     lipgloss.Style
 	CommandSeparator  lipgloss.Style
 	CommandScrollHint lipgloss.Style
 
-	// Inline box (preview + input + docs)
 	PreviewBox       lipgloss.Style
 	InputGhostPrompt lipgloss.Style
 	InputText        lipgloss.Style
 
-	// Description pane (right pane, kept for execScreenView)
 	DescTitle lipgloss.Style
 	DescBody  lipgloss.Style
 
-	// List items (used by CommandDelegate + exec dimmed list)
 	ItemNormal   lipgloss.Style
 	ItemSelected lipgloss.Style
 	ItemDim      lipgloss.Style
 
-	// Layout
 	Divider lipgloss.Style
 
-	// Status bar / help
 	HelpKey  lipgloss.Style
 	HelpDesc lipgloss.Style
 	HelpSep  lipgloss.Style
@@ -97,11 +80,9 @@ func newStyles() tuiStyles {
 		Version: lipgloss.NewStyle().
 			Foreground(colourDim),
 
-		// VimModeIndicator sits left of the version: "  [VIM]  v2.9.19"
 		VimModeIndicator: lipgloss.NewStyle().
 			Foreground(colourDim),
 
-		// GhostCommand is the currently-hovered command name shown in the header.
 		GhostCommand: lipgloss.NewStyle().
 			Foreground(colourDim),
 
@@ -118,13 +99,11 @@ func newStyles() tuiStyles {
 		CommandScrollHint: lipgloss.NewStyle().
 			Foreground(colourDim),
 
-		// PreviewBox — rounded border in dim colour, compact padding.
 		PreviewBox: lipgloss.NewStyle().
 			Border(lipgloss.RoundedBorder()).
 			BorderForeground(colourDim).
 			Padding(0, 1),
 
-		// InputGhostPrompt — the non-editable "valet.sh service " prefix.
 		InputGhostPrompt: lipgloss.NewStyle().
 			Foreground(colourDim),
 
@@ -160,7 +139,6 @@ func newStyles() tuiStyles {
 		HelpSep: lipgloss.NewStyle().
 			Foreground(colourDim),
 
-		// Arg pane styles — kept for args.go (future multi-field input).
 		ArgPaneTitle: lipgloss.NewStyle().
 			Bold(true).
 			Foreground(colourBlue),

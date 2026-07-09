@@ -61,14 +61,10 @@ type ExecModel struct {
 	// command is the display string shown in the header, e.g. "service start php83".
 	command string
 
-	// version string shown in the header.
 	version string
+	proc    *exec.Cmd
 
-	// proc is the running ansible-playbook subprocess.
-	proc *exec.Cmd
-
-	// cleanup is a function that deletes temporary files created for the process.
-	// Called in the execDoneMsg handler after the process exits.
+	// cleanup deletes temporary files after the process exits.
 	cleanup func()
 
 	// ansibleOut is the reader connected to ansible-playbook's stdout pipe.
@@ -177,11 +173,8 @@ func (e ExecModel) Update(msg tea.Msg) (ExecModel, tea.Cmd) {
 	switch msg := msg.(type) {
 	case ansibleEventMsg:
 		if msg.eof {
-			// Stdout pipe fully drained — all vsh_stdout content is in the buffer.
+			// Quit in CLI success mode only when both this and execDoneMsg have arrived.
 			e.stdoutEOF = true
-			// Quit in CLI success mode only when execDoneMsg has also arrived.
-			// If execDoneMsg arrived first: done=true → quit now.
-			// If this arrives first: done=false → set flag, execDoneMsg will quit.
 			if e.done && e.err == nil {
 				return e, tea.Quit
 			}
@@ -205,19 +198,13 @@ func (e ExecModel) Update(msg tea.Msg) (ExecModel, tea.Cmd) {
 	case execDoneMsg:
 		e.done = true
 		e.err = msg.err
-		// Clean up temporary files (password file, extra-vars file).
 		if e.cleanup != nil {
 			e.cleanup()
 		}
-		// Quit in CLI success mode only after stdout is fully drained.
-		// If stdoutEOF is already true (ansibleEventMsg{eof:true} arrived first):
-		// safe to quit now — buffer is complete.
-		// If stdoutEOF is false (pipe not yet drained):
-		// don't quit yet — ansibleEventMsg{eof:true} handler will quit when it fires.
+		// Quit in CLI success mode only when stdout is fully drained too.
 		if e.err == nil && e.stdoutEOF {
 			return e, tea.Quit
 		}
-		// On failure: user must press a key first, then we show the prompt.
 		return e, nil
 
 	case tea.KeyPressMsg:
@@ -236,39 +223,32 @@ func (e ExecModel) Update(msg tea.Msg) (ExecModel, tea.Cmd) {
 func (e ExecModel) handleKey(msg tea.KeyPressMsg) (ExecModel, tea.Cmd) {
 	key := msg.String()
 
-	// Awaiting Y/n prompt after failure.
 	if e.awaitingLogPrompt {
 		switch key {
-		case "y", "Y", "enter":
-			e.awaitingLogPrompt = false
-			e.logViewRequested = true
-			return e, tea.Quit
-		case "n", "esc", "q", "ctrl+c":
-			return e, tea.Quit
-		}
-		// Silently ignore all other keys while prompting.
-		return e, nil
+	case "y", "Y", "enter":
+		e.awaitingLogPrompt = false
+		e.logViewRequested = true
+		return e, tea.Quit
+	case "n", "esc", "q", "ctrl+c":
+		return e, tea.Quit
+	}
+	return e, nil
 	}
 
-	// Still running — handle ctrl+c only.
 	if !e.done {
 		if key == "ctrl+c" {
-			// Signal the subprocess to terminate.
 			if e.proc != nil && e.proc.Process != nil {
 				_ = e.proc.Process.Signal(os.Interrupt)
 			}
-			// Clean up temp files immediately (prevent double-call from execDoneMsg).
 			if e.cleanup != nil {
 				e.cleanup()
 				e.cleanup = nil
 			}
 			return e, tea.Quit
 		}
-		// Silently ignore other keys while running.
 		return e, nil
 	}
 
-	// Done with error — show prompt on first key press (unless it's ctrl+c or y/Y).
 	if e.err != nil && !e.awaitingLogPrompt {
 		if key == "ctrl+c" || key == "esc" || key == "q" {
 			return e, tea.Quit
@@ -296,7 +276,6 @@ func (e ExecModel) View() string {
 func (e ExecModel) cliView() string {
 	var output strings.Builder
 
-	// Header: command being run + version.
 	cmdLabel := styles.Header.Render("▶ valet.sh " + e.command)
 	versionLabel := styles.Version.Render("v" + e.version)
 	versionPadding := e.width - lipgloss.Width(cmdLabel) - lipgloss.Width(versionLabel) - 2
@@ -305,10 +284,8 @@ func (e ExecModel) cliView() string {
 	}
 	_, _ = fmt.Fprintln(&output, cmdLabel+strings.Repeat(" ", versionPadding)+versionLabel)
 
-	// Spinner line: shows current task while running, checkmark/cross when done.
 	_, _ = fmt.Fprintln(&output, e.progressBarView())
 
-	// On error: show hint or prompt.
 	if e.done && e.err != nil {
 		if e.awaitingLogPrompt {
 			promptLine := styles.HelpDesc.Render("View full log? ") +
@@ -325,15 +302,10 @@ func (e ExecModel) cliView() string {
 	return output.String()
 }
 
-// logViewerView renders the full-screen log viewer.
-// spinnerFrames are the animation frames for the progress spinner.
-// Each frame is displayed for one logPollInterval (100ms).
-// Used as a fallback when totalTasks is unknown.
+// spinnerFrames are the animation frames for the progress spinner (Braille U+2800..U+28FF).
 var spinnerFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
 
-// progressBarView renders the progress indicator line between the header and
-// the log viewport. Shows a spinner with current task while running, checkmark or
-// cross when done.
+// progressBarView renders the progress indicator: spinner with task while running, checkmark/cross when done.
 func (e ExecModel) progressBarView() string {
 	if e.done {
 		if e.err != nil {
@@ -346,23 +318,19 @@ func (e ExecModel) progressBarView() string {
 		)
 	}
 
-	// Always show spinner while running.
 	frame := spinnerFrames[e.spinnerFrame%len(spinnerFrames)]
 	spinner := styles.HelpKey.Render(frame)
 
-	// Show current task if available, otherwise show "running..."
 	taskDisplay := e.currentTask
 	if taskDisplay == "" {
 		taskDisplay = "running..."
 	} else {
-		// Shorten the task name to show only the description part (after | or :)
 		taskDisplay = shortTaskName(taskDisplay)
 	}
 	counter := styles.HelpDesc.Render("  " + taskDisplay)
 	return spinner + counter
 }
 
-// statusLines returns the footer content — one or two lines depending on state.
 func (e ExecModel) statusLines() string {
 	if !e.done {
 		return styles.HelpDesc.Render("⠋ running...   ↑/↓ scroll   C copy")
@@ -449,8 +417,6 @@ func waitForProcess(cmd *exec.Cmd) tea.Cmd {
 	}
 }
 
-// openLogViewerCmd delivers a logViewReadyMsg from the already-accumulated
-// logLines slice. No file I/O — the lines were built from JSON events in-process.
 // readTaskCmd returns a tea.Cmd that blocks reading JSON lines from the
 // ansible.posix.jsonl stdout stream and returns an ansibleEventMsg for each
 // parsed event:
@@ -491,7 +457,6 @@ func readTaskCmd(r io.Reader, out *bytes.Buffer) tea.Cmd {
 	}
 }
 
-// ansibleHostResult holds the per-host fields we extract from jsonl events.
 // IsTTY reports whether stdout is connected to a terminal.
 func IsTTY() bool {
 	fi, err := os.Stdout.Stat()

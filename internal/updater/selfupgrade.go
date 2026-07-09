@@ -36,13 +36,11 @@ func SelfUpgrade(currentVersion string, originalArgs []string, repoDir string) e
 	fmt.Println(blue("▶ Checking for updates..."))
 	fmt.Println()
 
-	// Try to update CLI binary
 	cliUpdated, err := upgradeCliIfNeeded(currentVersion)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "%s CLI update check failed: %v\n", ansiRed+"✘"+ansiReset, err)
 	}
 
-	// Try to update Ansible playbook repo
 	ansibleUpdated, err := upgradeAnsibleIfNeeded(repoDir)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "%s Ansible playbook update failed: %v\n", ansiRed+"✘"+ansiReset, err)
@@ -87,29 +85,24 @@ func upgradeCliIfNeeded(currentVersion string) (bool, error) {
 	fmt.Printf("%s New CLI version available: %s → %s\n",
 		blue("▶"), currentVersion, green(latest))
 
-	// Detect OS and architecture
 	goos := runtime.GOOS
 	goarch := runtime.GOARCH
 	assetName := fmt.Sprintf("valet-%s-%s", goos, goarch)
 
-	// Download binary and checksums
 	fmt.Printf("  Downloading %s...\n", assetName)
 	binPath, err := downloadAndVerifyBinary(latest, assetName)
 	if err != nil {
 		return false, fmt.Errorf("download failed: %w", err)
 	}
 
-	// Atomically replace the current binary
 	installPath := "/usr/local/valet-sh/bin/valet"
 	fmt.Printf("  Installing to %s...\n", installPath)
 
-	// Create temp file in the same directory for atomic rename
 	tmpFile := installPath + ".tmp"
 	if err := os.Rename(binPath, tmpFile); err != nil {
 		return false, fmt.Errorf("failed to move downloaded binary: %w", err)
 	}
 
-	// Make executable
 	if err := os.Chmod(tmpFile, 0o755); err != nil {
 		_ = os.Remove(tmpFile)
 		return false, fmt.Errorf("failed to chmod binary: %w", err)
@@ -128,24 +121,19 @@ func upgradeCliIfNeeded(currentVersion string) (bool, error) {
 // upgradeAnsibleIfNeeded checks for updates to the Ansible playbook repo
 // and pulls the latest changes if available. Returns true if an update was performed.
 func upgradeAnsibleIfNeeded(repoDir string) (bool, error) {
-	// Check if the repo directory exists and is a git repo
 	gitDir := filepath.Join(repoDir, ".git")
 	if _, err := os.Stat(gitDir); err != nil {
-		// Not a git repo, skip update
 		fmt.Printf("%s Ansible playbooks are not in a git repo. Skipping update.\n", blue("ℹ"))
 		return false, nil
 	}
 
-	// Fetch from remote to check if there are updates
 	fmt.Printf("%s Checking for Ansible playbook updates...\n", blue("▶"))
 	cmd := exec.Command("git", "-C", repoDir, "fetch", "--quiet", "origin", "master")
 	if err := cmd.Run(); err != nil {
-		// Silently skip if fetch fails (network issue, no remote, etc.)
 		fmt.Printf("%s Could not fetch Ansible playbook updates\n", blue("ℹ"))
 		return false, nil
 	}
 
-	// Compare local HEAD with remote HEAD
 	localHeadCmd := exec.Command("git", "-C", repoDir, "rev-parse", "HEAD")
 	localHead, err := localHeadCmd.Output()
 	if err != nil {
@@ -166,7 +154,6 @@ func upgradeAnsibleIfNeeded(repoDir string) (bool, error) {
 		return false, nil
 	}
 
-	// Pull the latest changes
 	fmt.Println("  Pulling latest Ansible playbooks...")
 	pullCmd := exec.Command("git", "-C", repoDir, "pull", "--quiet", "origin", "master")
 	if err := pullCmd.Run(); err != nil {
@@ -182,26 +169,22 @@ func upgradeAnsibleIfNeeded(repoDir string) (bool, error) {
 func downloadAndVerifyBinary(version, assetName string) (string, error) {
 	releaseURL := fmt.Sprintf("https://api.github.com/repos/valet-sh/valet-sh-cli/releases/download/%s", version)
 
-	// Create a temporary directory for downloads
 	tmpDir, err := os.MkdirTemp("", "valet-upgrade-*")
 	if err != nil {
 		return "", fmt.Errorf("failed to create temp directory: %w", err)
 	}
 	defer os.RemoveAll(tmpDir)
 
-	// Download checksums.txt
 	checksumsPath := filepath.Join(tmpDir, "checksums.txt")
 	if err := downloadFile(releaseURL+"/checksums.txt", checksumsPath); err != nil {
 		return "", fmt.Errorf("failed to download checksums: %w", err)
 	}
 
-	// Download binary
 	binaryPath := filepath.Join(tmpDir, assetName)
 	if err := downloadFile(releaseURL+"/"+assetName, binaryPath); err != nil {
 		return "", fmt.Errorf("failed to download binary: %w", err)
 	}
 
-	// Verify checksum
 	if err := verifySha256(binaryPath, checksumsPath, assetName); err != nil {
 		return "", fmt.Errorf("checksum verification failed: %w", err)
 	}
@@ -239,7 +222,6 @@ func downloadFile(url, dest string) error {
 // verifySha256 verifies the SHA256 checksum of a file against the checksums file.
 // The checksums file should contain lines in the format: "sha256  filename"
 func verifySha256(filePath, checksumsPath, expectedFileName string) error {
-	// Read the file
 	f, err := os.Open(filePath)
 	if err != nil {
 		return fmt.Errorf("failed to open file: %w", err)
@@ -248,14 +230,12 @@ func verifySha256(filePath, checksumsPath, expectedFileName string) error {
 		_ = f.Close()
 	}()
 
-	// Compute SHA256
 	h := sha256.New()
 	if _, err := io.Copy(h, f); err != nil {
 		return fmt.Errorf("failed to read file: %w", err)
 	}
 	actualSha := hex.EncodeToString(h.Sum(nil))
 
-	// Parse checksums file
 	checksumsFile, err := os.Open(checksumsPath)
 	if err != nil {
 		return fmt.Errorf("failed to open checksums file: %w", err)
@@ -264,7 +244,6 @@ func verifySha256(filePath, checksumsPath, expectedFileName string) error {
 		_ = checksumsFile.Close()
 	}()
 
-	// Find the line matching the expected filename
 	scanner := bufio.NewScanner(checksumsFile)
 	for scanner.Scan() {
 		line := scanner.Text()

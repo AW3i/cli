@@ -149,10 +149,8 @@ func (b InlineBox) InputView() string {
 func (b InlineBox) View() string {
 	innerWidth := b.width - 2*inlineBoxPaddingH - 2
 
-	// Docs only — no input line in the box.
 	contentLines := b.visibleDocLines()
 
-	// Scroll hint if there are more lines below.
 	totalLines := len(b.docsLines)
 	if totalLines > inlineBoxMaxDocLines {
 		remaining := totalLines - b.docsOffset - inlineBoxMaxDocLines

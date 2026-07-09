@@ -122,12 +122,8 @@ func Run(opts *RunOpts) error {
 	env := os.Environ()
 	env = setEnv(env, "OLDPWD", workDir)
 
-	// Use syscall.Exec so that signals (SIGINT, SIGTERM) are delivered directly
-	// to ansible-playbook and the valet process vanishes from the process table.
-	//
-	// SECURITY: This intentionally replaces the current process with ansible-playbook.
-	// The argv and env are constructed from trusted sources (platform package constants
-	// and user's CLI arguments). This is the same behavior as the original bash wrapper.
+	// Use syscall.Exec to deliver signals directly to ansible-playbook.
+	// argv/env are from trusted sources (platform constants + CLI args).
 	binPath, err := exec.LookPath(ansibleBin)
 	if err != nil {
 		// ansibleBin may already be an absolute path.
@@ -137,25 +133,10 @@ func Run(opts *RunOpts) error {
 	return syscall.Exec(binPath, argv, env)
 }
 
-// RunSubprocess starts ansible-playbook as a child process without replacing
-// the current process image. Unlike Run(), which uses syscall.Exec, this
-// returns a started *exec.Cmd so the caller can wait on it and observe its
-// exit status — used by the TUI execution panel which needs the Go process
-// to stay alive for log tailing and rendering.
-//
-// Ansible's own vars_prompt handles any become-password prompt natively —
-// stdin is passed through to the subprocess so the user types the password
-// directly into Ansible's prompt before the TUI exec panel starts.
-//
-// The Ansible callback plugin writes spinner lines ("⠙ taskname\r") to stdout
-// for every task start. RunSubprocess pipes that stdout so the TUI can read
-// task names in real time without parsing the log file. The first byte on
-// the stdout pipe signals that vars_prompt has completed and tasks have begun;
-// the caller uses this to gate BubbleTea startup.
-//
-// stderr is discarded; structured output goes to the log file.
-//
-// Returns the started process, a reader for its stdout, and a cleanup func.
+// RunSubprocess starts ansible-playbook as a child process, returning a reader for
+// its JSON output. Ansible's vars_prompt handles password input natively on the real
+// stdin before the TUI starts. The caller gates BubbleTea on the first JSON task-start
+// event (after vars_prompt completes). Returns the process, stdout reader, and cleanup func.
 func RunSubprocess(opts *RunOpts) (*exec.Cmd, io.Reader, func(), error) {
 	playbookPath := filepath.Join(platform.RepoDir(), "playbooks", opts.Playbook+".yml")
 	if _, err := os.Stat(playbookPath); err != nil {
@@ -192,9 +173,7 @@ func RunSubprocess(opts *RunOpts) (*exec.Cmd, io.Reader, func(), error) {
 	ansibleBin := platform.AnsiblePlaybookBin()
 	repoDir := platform.RepoDir()
 
-	// Write extra-vars to a temp file so they do not appear in the process
-	// list (ps aux). The file contains only non-sensitive routing data
-	// (cli.args, cli.opts).
+	// Write extra-vars to a temp file to keep them out of ps aux output.
 	evFile, err := os.CreateTemp("", "valetsh-vars-*")
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("creating extra-vars file: %w", err)
@@ -224,25 +203,17 @@ func RunSubprocess(opts *RunOpts) (*exec.Cmd, io.Reader, func(), error) {
 
 	env := os.Environ()
 	env = setEnv(env, "OLDPWD", workDir)
-	// Force Python to write stdout unbuffered so the callback plugin's spinner
-	// lines ("⠙ taskname\r") arrive at the Go pipe reader in real time instead
-	// of sitting in Python's 8 KB internal buffer until process exit.
+	// Force Python to write stdout unbuffered so spinner lines arrive in real time.
 	env = setEnv(env, "PYTHONUNBUFFERED", "1")
 
 	cmd := exec.Command(ansibleBin, args...)
 	cmd.Dir = repoDir
 	cmd.Env = env
 
-	// Pass the real stdin through so Ansible's vars_prompt can ask for the
-	// become password natively. The caller (RunWithPanel) gates BubbleTea
-	// startup until the first byte appears on stdout — at that point
-	// vars_prompt has completed and stdin is no longer used by Ansible.
+	// Pass stdin through so vars_prompt can read the password natively.
 	cmd.Stdin = os.Stdin
 
-	// Pipe stdout so the TUI can read task names in real time.
-	// The callback plugin prints "⠙ taskname\r" to stdout for each task start.
-	// StdoutPipe must be called before Start; it returns a reader that is
-	// automatically closed when cmd.Wait() is called by waitForProcess.
+	// Pipe stdout so the TUI can read task names in real time from JSON output.
 	stdoutPipe, err := cmd.StdoutPipe()
 	if err != nil {
 		cleanup()
