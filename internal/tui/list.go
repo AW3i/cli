@@ -126,6 +126,19 @@ func itemsFromCommands(cmds []*cobra.Command, withBack bool) []list.Item {
 	return items
 }
 
+// prefixFilter filters items by prefix match (case-insensitive).
+// Returns a rank for each item that starts with the search term.
+func prefixFilter(term string, targets []string) []list.Rank {
+	lower := strings.ToLower(term)
+	var ranks []list.Rank
+	for i, t := range targets {
+		if strings.HasPrefix(strings.ToLower(t), lower) {
+			ranks = append(ranks, list.Rank{Index: i})
+		}
+	}
+	return ranks
+}
+
 // CommandDelegate is a custom list delegate — kept for compatibility with
 // bubbles/list internals. The horizontal command bar uses renderHorizontalList()
 // for display instead of commandList.View().
@@ -262,8 +275,8 @@ func renderHelpBar(vimMode bool, width int) string {
 
 	if vimMode {
 		bindings = []struct{ key, desc string }{
-			{"h/l", "navigate"},
-			{"/", "filter"},
+		{"h/l", "navigate"},
+		{"/", "search"},
 			{"?", "help"},
 			{"↵", "select"},
 			{"esc", "back"},
@@ -273,7 +286,6 @@ func renderHelpBar(vimMode bool, width int) string {
 	} else {
 		bindings = []struct{ key, desc string }{
 			{"←/→", "navigate"},
-			{"/", "filter"},
 			{"?", "help"},
 			{"↵", "select"},
 			{"esc", "back"},
