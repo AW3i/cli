@@ -121,15 +121,19 @@ func newModel(root *cobra.Command, version string, vimMode bool) model {
 // buildList creates a bubbles list.Model from a slice of cobra commands.
 // bubbles/list handles keyboard navigation and filter state; the visual
 // rendering is delegated to renderHorizontalList().
+// withBack=true for submenus (disables filtering); withBack=false for root.
 func buildList(cmds []*cobra.Command, withBack bool, width, height int) list.Model {
 	items := itemsFromCommands(cmds, withBack)
 	delegate := NewCommandDelegate()
 	l := list.New(items, delegate, width, height)
 	l.SetShowTitle(false)
 	l.SetShowStatusBar(false)
-	l.SetFilteringEnabled(true)
+	l.SetFilteringEnabled(!withBack) // only root list can filter
 	l.SetShowHelp(false)
 	l.DisableQuitKeybindings()
+
+	// Use prefix filter for faster, more predictable matching.
+	l.Filter = prefixFilter
 
 	// Style the filter input to match the valet-sh palette.
 	l.FilterInput.Prompt = "/ "
@@ -227,11 +231,33 @@ func (m model) handleListKey(key string, msg tea.KeyPressMsg) (tea.Model, tea.Cm
 			return m.openHelp()
 		}
 	case "enter":
-		if m.commandList.FilterState() != list.Filtering {
-			return m.selectItem()
-		}
+		return m.selectItem()
 	}
 
+	// Root view only — filter activation.
+	if len(m.stack) == 1 && m.commandList.FilterState() != list.Filtering {
+		if m.vimMode {
+			// Vim mode: '/' opens filter. All other unhandled keys are swallowed.
+			if key == "/" {
+				m.commandList.SetFilterText("")
+				m.commandList.SetFilterState(list.Filtering)
+				m.stack[len(m.stack)-1].list = m.commandList
+				return m, nil
+			}
+			return m, nil
+		}
+		// Normal mode: any printable character (except '/') activates filter
+		// with that character pre-typed.
+		if msg.Text != "" && msg.Text != "/" && msg.Mod == 0 {
+			m.commandList.SetFilterText(msg.Text)
+			m.commandList.SetFilterState(list.Filtering)
+			m.stack[len(m.stack)-1].list = m.commandList
+			return m, nil
+		}
+		if m.vimMode && key == "/" {
+			// Vim mode: '/' activates filter (bubbles/list handles it below).
+		}
+	}
 
 	var cmd tea.Cmd
 	m.commandList, cmd = m.commandList.Update(msg)
@@ -381,7 +407,11 @@ func (m model) render() string {
 		_, _ = fmt.Fprint(&output, m.helpView())
 	default:
 		_, _ = fmt.Fprintln(&output, renderHorizontalList(m.commandList, m.width))
-		if m.commandList.FilterState() == list.Filtering {
+		// Show filter bar when filtering is active.
+		// Vim mode: show immediately on '/' (even empty) so the user knows filter is active.
+		// Normal mode: only show once text has been typed (first char is pre-filled via SetFilterText).
+		if m.commandList.FilterState() == list.Filtering &&
+			(m.vimMode || m.commandList.FilterInput.Value() != "") {
 			_, _ = fmt.Fprintln(&output, "  "+m.commandList.FilterInput.View())
 		}
 		_, _ = fmt.Fprintln(&output, dividerLine(m.width))
