@@ -125,15 +125,19 @@ func newModel(root *cobra.Command, version string, vimMode bool) model {
 // buildList creates a bubbles list.Model from a slice of cobra commands.
 // bubbles/list handles keyboard navigation and filter state; the visual
 // rendering is delegated to renderHorizontalList().
+// withBack=true for submenus (disables filtering); withBack=false for root.
 func buildList(cmds []*cobra.Command, withBack bool, width, height int) list.Model {
 	items := itemsFromCommands(cmds, withBack)
 	delegate := NewCommandDelegate()
 	l := list.New(items, delegate, width, height)
 	l.SetShowTitle(false)
 	l.SetShowStatusBar(false)
-	l.SetFilteringEnabled(true)
+	l.SetFilteringEnabled(!withBack) // only root list can filter
 	l.SetShowHelp(false)
 	l.DisableQuitKeybindings()
+
+	// Use prefix filter for faster, more predictable matching.
+	l.Filter = prefixFilter
 
 	// Style the filter input to match the valet-sh palette.
 	l.FilterInput.Prompt = "/ "
@@ -234,6 +238,20 @@ func (m model) handleListKey(key string, msg tea.KeyPressMsg) (tea.Model, tea.Cm
 	case "enter":
 		if m.commandList.FilterState() != list.Filtering {
 			return m.selectItem()
+		}
+	}
+
+	// Type-to-filter in root view: trigger filter activation on first keypress.
+	if len(m.stack) == 1 && m.commandList.FilterState() != list.Filtering {
+		if !m.vimMode && msg.Text != "" && msg.Mod == 0 {
+			// Non-vim mode: any printable character activates prefix filter.
+			m.commandList.SetFilterText(msg.Text)
+			m.commandList.SetFilterState(list.Filtering)
+			m.stack[len(m.stack)-1].list = m.commandList
+			return m, nil
+		}
+		if m.vimMode && key == "/" {
+			// Vim mode: '/' activates filter (bubbles/list handles it below).
 		}
 	}
 
