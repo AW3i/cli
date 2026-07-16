@@ -14,179 +14,202 @@
 #   See the License for the specific language governing permissions and
 #   limitations under the License.
 ##
+#
+# valet.sh installer — installs all three components of valet.sh:
+#   1. Runtime venv  (valet-sh/runtime)     -> /usr/local/valet-sh/venv
+#   2. Ansible repo  (playbooks)            -> /usr/local/valet-sh/valet-sh
+#   3. Go CLI binary (release asset)        -> /usr/local/valet-sh/bin/valet
+# and a `valet.sh` shim on PATH.
+#
+# FIXME(revert-before-upstream-merge): defaults below point at the AW3i fork
+# (CLI repo AW3i/cli, playbooks AW3i/valet-sh @ 3.x) for testing. Once merged
+# upstream, change the defaults back to valet-sh/valet-sh-cli + valet-sh/valet-sh
+# @ master. All values are overridable via environment variables.
 
-set -e
+set -euo pipefail
 
 # Colors
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 BLUE='\033[1;34m'
-NC='\033[0m' # No Color
+NC='\033[0m'
 
-# Detect OS and architecture
+# ---------------------------------------------------------------------------
+# Configuration (env-overridable)
+# ---------------------------------------------------------------------------
+VSH_CLI_REPO="${VSH_CLI_REPO:-AW3i/cli}"
+VSH_PLAYBOOK_REPO="${VSH_PLAYBOOK_REPO:-AW3i/valet-sh}"
+VSH_PLAYBOOK_BRANCH="${VSH_PLAYBOOK_BRANCH:-3.x}"
+VSH_RUNTIME_REPO="${VSH_RUNTIME_REPO:-valet-sh/runtime}"
+
+INSTALL_BASE="/usr/local/valet-sh"
+INSTALL_BIN="${INSTALL_BASE}/bin/valet"
+VENV_DIR="${INSTALL_BASE}/venv"
+PLAYBOOK_DIR="${INSTALL_BASE}/valet-sh"
+SYMLINK="/usr/local/bin/valet.sh"
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+info()  { echo -e "${BLUE}▶${NC} $*"; }
+ok()    { echo -e "${GREEN}✓${NC} $*"; }
+err()   { echo -e "${RED}✘${NC} $*" >&2; }
+die()   { err "$*"; exit 1; }
+
+# Run a command as root when not already root (uses sudo if available).
+as_root() {
+    if [ "$(id -u)" -eq 0 ]; then
+        "$@"
+    elif command -v sudo >/dev/null 2>&1; then
+        sudo "$@"
+    else
+        die "root privileges required for: $*"
+    fi
+}
+
+# ---------------------------------------------------------------------------
+# Detect OS / architecture
+# ---------------------------------------------------------------------------
 OS="$(uname -s | tr '[:upper:]' '[:lower:]')"
 ARCH="$(uname -m)"
 
-# Map architecture names
 case "$ARCH" in
-    x86_64)
-        ARCH="amd64"
-        ;;
-    aarch64)
-        ARCH="arm64"
-        ;;
+    x86_64|amd64) GOARCH="amd64"; RT_ARCH="x86_64" ;;
+    aarch64|arm64) GOARCH="arm64"; RT_ARCH="arm64" ;;
+    *) die "Unsupported architecture: $ARCH" ;;
 esac
 
-# Map OS names
 case "$OS" in
-    linux)
-        OS="linux"
-        ;;
-    darwin)
-        OS="darwin"
-        ;;
-    *)
-        echo -e "${RED}✘ Unsupported OS: $OS${NC}"
-        exit 1
-        ;;
+    linux) OS="linux" ;;
+    darwin) OS="darwin" ;;
+    *) die "Unsupported OS: $OS" ;;
 esac
 
-PLATFORM="${OS}-${ARCH}"
+PLATFORM="${OS}-${GOARCH}"
 BINARY_NAME="valet-${PLATFORM}"
-INSTALL_BASE="/usr/local/valet-sh"
-INSTALL_BIN="${INSTALL_BASE}/bin/valet"
-
-# GitHub release constants
-GITHUB_REPO="valet-sh/valet-sh-cli"
-GITHUB_API="https://api.github.com/repos/${GITHUB_REPO}"
-RELEASE_URL="${GITHUB_API}/releases/latest"
 
 echo -e "${BLUE}▶ valet.sh installer${NC}"
+echo "  CLI repo:      ${VSH_CLI_REPO}"
+echo "  Playbooks:     ${VSH_PLAYBOOK_REPO}@${VSH_PLAYBOOK_BRANCH}"
+echo "  Runtime repo:  ${VSH_RUNTIME_REPO}"
 echo
 
-# Fetch latest release info
-echo "Fetching latest valet-sh CLI release..."
-RELEASE_JSON=$(curl -s -H "Accept: application/vnd.github+json" "${RELEASE_URL}")
-VERSION=$(echo "${RELEASE_JSON}" | grep -o '"tag_name":"[^"]*"' | head -1 | cut -d'"' -f4 | sed 's/^v//')
-
-if [ -z "$VERSION" ]; then
-    echo -e "${RED}✘ Failed to determine latest version from GitHub${NC}"
-    exit 1
+# ---------------------------------------------------------------------------
+# 1. Dependencies (Linux/apt only; macOS assumes brew/git present)
+# ---------------------------------------------------------------------------
+if [ "$OS" = "linux" ] && command -v apt-get >/dev/null 2>&1; then
+    info "Installing base dependencies (git, python3, python3-venv, curl, tar)"
+    as_root apt-get update -y >/dev/null
+    as_root env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+        git python3 python3-venv curl ca-certificates tar >/dev/null
 fi
 
-echo -e "${GREEN}✓ Latest version: ${VERSION}${NC}"
-echo
+# ---------------------------------------------------------------------------
+# Prepare install directory
+# ---------------------------------------------------------------------------
+info "Preparing ${INSTALL_BASE}"
+as_root mkdir -p "${INSTALL_BASE}/bin" "${INSTALL_BASE}/etc"
+# Make the tree writable for the current user so the rest runs without sudo.
+as_root chown -R "$(id -un)":"$(id -gn)" "${INSTALL_BASE}"
 
-# Download binary and checksums
-DOWNLOAD_BASE="https://github.com/${GITHUB_REPO}/releases/download/v${VERSION}"
+# ---------------------------------------------------------------------------
+# 2. Playbooks (clone first — we need .runtime_version from it)
+# ---------------------------------------------------------------------------
+if [ -d "${PLAYBOOK_DIR}/.git" ]; then
+    info "Updating playbooks (${VSH_PLAYBOOK_REPO}@${VSH_PLAYBOOK_BRANCH})"
+    git -C "${PLAYBOOK_DIR}" fetch --quiet origin "${VSH_PLAYBOOK_BRANCH}"
+    git -C "${PLAYBOOK_DIR}" checkout --quiet "${VSH_PLAYBOOK_BRANCH}"
+    git -C "${PLAYBOOK_DIR}" reset --hard --quiet "origin/${VSH_PLAYBOOK_BRANCH}"
+else
+    info "Cloning playbooks (${VSH_PLAYBOOK_REPO}@${VSH_PLAYBOOK_BRANCH})"
+    git clone --quiet --branch "${VSH_PLAYBOOK_BRANCH}" \
+        "https://github.com/${VSH_PLAYBOOK_REPO}.git" "${PLAYBOOK_DIR}" \
+        || die "failed to clone playbooks"
+fi
+ok "Playbooks ready at ${PLAYBOOK_DIR}"
 
-# Create temporary directory
-TEMP_DIR=$(mktemp -d)
-trap "rm -rf $TEMP_DIR" EXIT
+# ---------------------------------------------------------------------------
+# 3. Runtime venv (Python + Ansible + pip deps, e.g. beautifultable)
+# ---------------------------------------------------------------------------
+RUNTIME_VERSION="$(tr -d ' \t\n\r' < "${PLAYBOOK_DIR}/.runtime_version")"
+[ -n "${RUNTIME_VERSION}" ] || die "could not read .runtime_version from playbooks"
 
-echo "Downloading binary for ${PLATFORM}..."
-if ! curl -sL -o "${TEMP_DIR}/${BINARY_NAME}" "${DOWNLOAD_BASE}/${BINARY_NAME}"; then
-    echo -e "${RED}✘ Failed to download binary${NC}"
-    exit 1
+if [ "$OS" = "linux" ]; then
+    # Ubuntu package name is ubuntu_<codename>-<arch>
+    CODENAME="$(. /etc/os-release && echo "${VERSION_CODENAME:-}")"
+    [ -n "${CODENAME}" ] || die "could not determine Ubuntu codename from /etc/os-release"
+    RUNTIME_PKG="ubuntu_${CODENAME}-${RT_ARCH}"
+else
+    RUNTIME_PKG="macos-${RT_ARCH}"
 fi
 
-echo "Downloading checksums..."
-if ! curl -sL -o "${TEMP_DIR}/checksums.txt" "${DOWNLOAD_BASE}/checksums.txt"; then
-    echo -e "${RED}✘ Failed to download checksums${NC}"
-    exit 1
+RUNTIME_URL="https://github.com/${VSH_RUNTIME_REPO}/releases/download/${RUNTIME_VERSION}/${RUNTIME_PKG}.tar.gz"
+info "Installing runtime ${RUNTIME_VERSION} (${RUNTIME_PKG})"
+
+TEMP_DIR="$(mktemp -d)"
+trap 'rm -rf "${TEMP_DIR}"' EXIT
+
+if ! curl -fL --progress-bar -o "${TEMP_DIR}/runtime.tar.gz" "${RUNTIME_URL}"; then
+    die "failed to download runtime from ${RUNTIME_URL}"
 fi
+# The tarball's top-level directory is 'venv/', so extract into INSTALL_BASE.
+rm -rf "${VENV_DIR}"
+tar -C "${INSTALL_BASE}" -xzf "${TEMP_DIR}/runtime.tar.gz" || die "failed to extract runtime"
+[ -x "${VENV_DIR}/bin/ansible-playbook" ] \
+    || die "runtime venv missing ansible-playbook (unexpected tarball layout)"
+ok "Runtime venv installed at ${VENV_DIR}"
+
+# ---------------------------------------------------------------------------
+# 4. CLI binary (from GitHub release of the CLI repo)
+# ---------------------------------------------------------------------------
+RELEASE_URL="https://api.github.com/repos/${VSH_CLI_REPO}/releases/latest"
+info "Fetching latest ${VSH_CLI_REPO} release"
+RELEASE_JSON="$(curl -fsSL -H "Accept: application/vnd.github+json" "${RELEASE_URL}")" \
+    || die "failed to query releases API for ${VSH_CLI_REPO}"
+TAG="$(echo "${RELEASE_JSON}" | grep -o '"tag_name":[[:space:]]*"[^"]*"' | head -1 | cut -d'"' -f4)"
+[ -n "${TAG}" ] || die "no release found for ${VSH_CLI_REPO} (have you pushed a v* tag?)"
+ok "Latest release: ${TAG}"
+
+DOWNLOAD_BASE="https://github.com/${VSH_CLI_REPO}/releases/download/${TAG}"
+info "Downloading ${BINARY_NAME}"
+curl -fsSL -o "${TEMP_DIR}/${BINARY_NAME}" "${DOWNLOAD_BASE}/${BINARY_NAME}" \
+    || die "failed to download ${BINARY_NAME}"
+curl -fsSL -o "${TEMP_DIR}/checksums.txt" "${DOWNLOAD_BASE}/checksums.txt" \
+    || die "failed to download checksums.txt"
 
 # Verify checksum
-echo "Verifying checksum..."
-cd "${TEMP_DIR}"
-
-# Extract the expected checksum for our binary
-EXPECTED_SHA=$(grep "${BINARY_NAME}" checksums.txt | awk '{print $1}')
-
-if [ -z "$EXPECTED_SHA" ]; then
-    echo -e "${RED}✘ Checksum not found for ${BINARY_NAME}${NC}"
-    exit 1
-fi
-
-# Calculate actual checksum
-if command -v sha256sum &> /dev/null; then
-    ACTUAL_SHA=$(sha256sum "${BINARY_NAME}" | awk '{print $1}')
-elif command -v shasum &> /dev/null; then
-    ACTUAL_SHA=$(shasum -a 256 "${BINARY_NAME}" | awk '{print $1}')
+EXPECTED_SHA="$(grep "${BINARY_NAME}" "${TEMP_DIR}/checksums.txt" | awk '{print $1}')"
+[ -n "${EXPECTED_SHA}" ] || die "checksum not found for ${BINARY_NAME}"
+if command -v sha256sum >/dev/null 2>&1; then
+    ACTUAL_SHA="$(sha256sum "${TEMP_DIR}/${BINARY_NAME}" | awk '{print $1}')"
+elif command -v shasum >/dev/null 2>&1; then
+    ACTUAL_SHA="$(shasum -a 256 "${TEMP_DIR}/${BINARY_NAME}" | awk '{print $1}')"
 else
-    echo -e "${RED}✘ sha256sum or shasum not found${NC}"
-    exit 1
+    die "sha256sum or shasum not found"
 fi
+[ "${EXPECTED_SHA}" = "${ACTUAL_SHA}" ] || die "checksum verification failed for ${BINARY_NAME}"
+ok "Checksum verified"
 
-if [ "$EXPECTED_SHA" != "$ACTUAL_SHA" ]; then
-    echo -e "${RED}✘ Checksum verification failed${NC}"
-    echo "Expected: $EXPECTED_SHA"
-    echo "Got:      $ACTUAL_SHA"
-    exit 1
-fi
+install -m 0755 "${TEMP_DIR}/${BINARY_NAME}" "${INSTALL_BIN}"
+ok "CLI installed to ${INSTALL_BIN}"
 
-echo -e "${GREEN}✓ Checksum verified${NC}"
-echo
-
-# Create installation directory
-echo "Installing valet-sh CLI..."
-if [ ! -d "${INSTALL_BASE}" ]; then
-    echo "Creating ${INSTALL_BASE}..."
-    mkdir -p "${INSTALL_BASE}"/{bin,etc,valet-sh}
-fi
-
-# Create subdirectories if they don't exist
-mkdir -p "${INSTALL_BASE}"/{bin,etc,valet-sh}
-
-# Install binary
-install -m 755 "${TEMP_DIR}/${BINARY_NAME}" "${INSTALL_BIN}"
-echo -e "${GREEN}✓ CLI installed to ${INSTALL_BIN}${NC}"
-
-# Clone or pull valet-sh Ansible repository
-if [ -d "${INSTALL_BASE}/valet-sh/.git" ]; then
-    echo "Updating valet-sh Ansible repository..."
-    git -C "${INSTALL_BASE}/valet-sh" pull --quiet origin master || true
-else
-    echo "Cloning valet-sh Ansible repository..."
-    if ! git clone --quiet --branch master https://github.com/valet-sh/valet-sh.git "${INSTALL_BASE}/valet-sh"; then
-        echo -e "${BLUE}ℹ Warning: Failed to clone valet-sh Ansible repository${NC}"
-        echo "  You can manually clone it later:"
-        echo "  git clone https://github.com/valet-sh/valet-sh.git ${INSTALL_BASE}/valet-sh"
-    fi
-fi
-
-# Create symlink to /usr/local/bin if it doesn't exist or is wrong
-SYMLINK="/usr/local/bin/valet.sh"
-if [ -L "$SYMLINK" ] || [ -f "$SYMLINK" ]; then
-    rm -f "$SYMLINK"
-fi
-
-# Create a shim script instead of a symlink
-cat > "$SYMLINK" << 'EOF'
+# ---------------------------------------------------------------------------
+# 5. Shim on PATH
+# ---------------------------------------------------------------------------
+as_root rm -f "${SYMLINK}"
+as_root tee "${SYMLINK}" >/dev/null <<EOF
 #!/bin/bash
-exec /usr/local/valet-sh/bin/valet "$@"
+exec ${INSTALL_BIN} "\$@"
 EOF
-chmod 755 "$SYMLINK"
+as_root chmod 0755 "${SYMLINK}"
+ok "Shim created at ${SYMLINK}"
 
-echo -e "${GREEN}✓ Symlink created at ${SYMLINK}${NC}"
+# ---------------------------------------------------------------------------
+# Verify
+# ---------------------------------------------------------------------------
 echo
-
-# Test the installation
-echo "Testing installation..."
-if ! "${INSTALL_BIN}" --version > /dev/null 2>&1; then
-    echo -e "${RED}✘ Installation test failed${NC}"
-    exit 1
-fi
-
-VERSION_OUTPUT=$("${INSTALL_BIN}" --version)
-echo -e "${GREEN}✓ ${VERSION_OUTPUT}${NC}"
+"${INSTALL_BIN}" --version >/dev/null 2>&1 || die "installation test failed"
+ok "$("${INSTALL_BIN}" --version)"
 echo
-
-echo -e "${GREEN}✓ Installation complete!${NC}"
-echo
-echo "Next steps:"
-echo "  1. Ensure /usr/local/bin is in your PATH"
-echo "  2. Run: valet.sh --help"
-echo "  3. Create a .valet-sh.yml in your project directory"
-echo
-echo "For more information, visit: https://valet-sh.io"
+ok "valet.sh installation complete!"
+echo "  Run: valet.sh --help"

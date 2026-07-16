@@ -73,7 +73,9 @@ jobs:
           GOARCH: ${{ matrix.goarch }}
           CGO_ENABLED: "0"
         run: |
-          VERSION="${GITHUB_REF_NAME}"
+          # Strip a leading "v" so the embedded version matches the tag_name
+          # form the updater compares against (it TrimPrefix("v")s the API tag).
+          VERSION="${GITHUB_REF_NAME#v}"
           OUTPUT="valet-${{ matrix.goos }}-${{ matrix.goarch }}"
           go build \
             -trimpath \
