@@ -60,10 +60,6 @@ type model struct {
 	// activeScreen controls which component receives keystrokes.
 	activeScreen screen
 
-	// totalTasks is the number of tasks that will be executed, determined by
-	// ansible-playbook --list-tasks before the run. Zero means unknown.
-	totalTasks int
-
 	// selectedArgs holds the argv to dispatch after the launcher quits.
 	// Set by executeCommand(); read by Run() to populate Result.Args.
 	selectedArgs []string
@@ -223,8 +219,7 @@ func (m model) handleListKey(key string, msg tea.KeyPressMsg) (tea.Model, tea.Cm
 
 	switch key {
 	case "esc":
-		if m.commandList.FilterState() == list.Filtering {
-		} else {
+		if m.commandList.FilterState() != list.Filtering {
 			return m.popStack()
 		}
 	case "?":
@@ -236,6 +231,7 @@ func (m model) handleListKey(key string, msg tea.KeyPressMsg) (tea.Model, tea.Cm
 			return m.selectItem()
 		}
 	}
+
 
 	var cmd tea.Cmd
 	m.commandList, cmd = m.commandList.Update(msg)

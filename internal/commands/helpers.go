@@ -14,39 +14,4 @@
 
 package commands
 
-import (
-	"fmt"
-	"os"
 
-	"github.com/spf13/cobra"
-)
-
-// requireArgs returns a cobra.PositionalArgs validator that shows the
-// command's own help when fewer than min arguments are provided, and a
-// clean error (no stack trace, no usage dump) when too many are given.
-//
-// This replaces cobra.RangeArgs / cobra.MinimumNArgs on every subcommand so
-// that:
-//
-//	valet.sh service            → shows `valet service --help`
-//	valet.sh service start      → runs normally
-//	valet.sh service a b c d    → prints a short error, exits 1
-func requireArgs(minArgs, maxArgs int) cobra.PositionalArgs {
-	return func(cmd *cobra.Command, args []string) error {
-		if len(args) < minArgs {
-			// Print help to stdout (same as --help) and exit 0 — the user
-			// just didn't know the syntax, not an error worth a non-zero exit.
-			_ = cmd.Help()
-			os.Exit(0)
-		}
-		if maxArgs >= 0 && len(args) > maxArgs {
-			return fmt.Errorf("accepts between %d and %d argument(s), received %d", minArgs, maxArgs, len(args))
-		}
-		return nil
-	}
-}
-
-// requireMinArgs is a convenience wrapper for commands with no upper bound.
-func requireMinArgs(minArgs int) cobra.PositionalArgs {
-	return requireArgs(minArgs, -1)
-}

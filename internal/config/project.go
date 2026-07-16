@@ -163,26 +163,6 @@ func LoadProject(dir string) (*ProjectConfig, error) {
 	return &cfg, nil
 }
 
-// FindProjectRoot walks up from dir until it finds a .valet-sh.yml or reaches
-// the filesystem root. Returns the directory containing the file and the parsed
-// config, or an error if none is found.
-func FindProjectRoot(dir string) (string, *ProjectConfig, error) {
-	current := dir
-	for {
-		cfg, err := LoadProject(current)
-		if err == nil {
-			return current, cfg, nil
-		}
-
-		parent := filepath.Dir(current)
-		if parent == current {
-			break
-		}
-		current = parent
-	}
-	return "", nil, fmt.Errorf("%s not found in %s or any parent directory", ProjectFileName, dir)
-}
-
 // Validate performs basic sanity checks on the parsed config and returns a
 // slice of human-readable error strings (empty means valid).
 func (c *ProjectConfig) Validate() []string {

@@ -18,15 +18,12 @@
 package ansible
 
 import (
-	"bufio"
-	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strings"
 	"syscall"
 	"time"
 
@@ -236,108 +233,6 @@ func RunSubprocess(opts *RunOpts) (*exec.Cmd, io.Reader, func(), error) {
 	}
 
 	return cmd, stdoutPipe, cleanup, nil
-}
-
-// ListTasks runs ansible-playbook --list-tasks to count how many tasks
-// the playbook will execute. Returns 0 if listing fails so callers can
-// fall back gracefully to a spinner without a total count.
-//
-// This is used by the TUI to render a real progress bar: [=====>    ] 12/47
-// instead of just "12 tasks" with a spinner.
-func ListTasks(opts *RunOpts) int {
-	playbookPath := filepath.Join(platform.RepoDir(), "playbooks", opts.Playbook+".yml")
-	if _, err := os.Stat(playbookPath); err != nil {
-		return 0
-	}
-
-	workDir := opts.WorkDir
-	if workDir == "" {
-		workDir, _ = os.Getwd()
-	}
-
-	extraVars := ExtraVars{
-		CLI: CLIVars{
-			Args: opts.Args,
-			Opts: opts.Opts,
-		},
-	}
-	if extraVars.CLI.Args == nil {
-		extraVars.CLI.Args = []string{}
-	}
-	if extraVars.CLI.Opts == nil {
-		extraVars.CLI.Opts = []string{}
-	}
-
-	extraVarsJSON, err := json.Marshal(extraVars)
-	if err != nil {
-		return 0
-	}
-
-	ansibleBin := platform.AnsiblePlaybookBin()
-	repoDir := platform.RepoDir()
-
-	args := []string{playbookPath, "--list-tasks", "-e", string(extraVarsJSON)}
-	if opts.Verbose {
-		args = append(args, "-v")
-	}
-
-	cmd := exec.Command(ansibleBin, args...)
-	cmd.Dir = repoDir
-	cmd.Env = os.Environ()
-
-	var output bytes.Buffer
-	cmd.Stdout = &output
-	cmd.Stderr = nil
-
-	if err = cmd.Run(); err != nil {
-		return 0
-	}
-
-	return countTaskLines(output.String())
-}
-
-// countTaskLines counts lines in --list-tasks output that represent actual tasks.
-//
-// Ansible --list-tasks output format:
-//
-//	play #1 (localhost): Play name  TAGS: []
-//
-//	  task path: /path/to/file.yml:5
-//	  Task name  TAGS: []
-//
-// We identify task lines by:
-//   - Line starts with whitespace (indented)
-//   - Line contains "TAGS:" (present on all task/play lines)
-//   - Line does NOT contain "play #" (excludes play headers)
-//   - Line does NOT contain "task path:" (excludes path metadata lines)
-//
-// This heuristic may miscount in edge cases, but it is good enough for a
-// progress bar estimate. Returns 0 if the output is malformed.
-func countTaskLines(output string) int {
-	count := 0
-	scanner := bufio.NewScanner(strings.NewReader(output))
-	for scanner.Scan() {
-		line := scanner.Text()
-		trimmed := strings.TrimSpace(line)
-
-		// Must be indented and contain TAGS marker.
-		if len(line) == 0 || line[0] != ' ' || !strings.Contains(trimmed, "TAGS:") {
-			continue
-		}
-
-		// Skip play headers (they contain "play #").
-		if strings.Contains(trimmed, "play #") {
-			continue
-		}
-
-		// Skip "task path:" metadata lines.
-		if strings.HasPrefix(trimmed, "task path:") {
-			continue
-		}
-
-		count++
-	}
-	return count
 }
 
 // setEnv sets or replaces a key in an environ slice (KEY=VALUE format).

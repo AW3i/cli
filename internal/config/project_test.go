@@ -173,23 +173,4 @@ func TestValidate(t *testing.T) {
 	}
 }
 
-func TestFindProjectRoot(t *testing.T) {
-	// Create a nested directory structure
-	tmpDir := t.TempDir()
-	subDir := filepath.Join(tmpDir, "src", "app", "code")
-	os.MkdirAll(subDir, 0o755)
 
-	configContent := "instance:\n  key: test\n  type: magento2\n"
-	os.WriteFile(filepath.Join(tmpDir, ProjectFileName), []byte(configContent), 0o644)
-
-	root, cfg, err := FindProjectRoot(subDir)
-	if err != nil {
-		t.Fatalf("FindProjectRoot failed: %v", err)
-	}
-	if root != tmpDir {
-		t.Errorf("FindProjectRoot returned %q, want %q", root, tmpDir)
-	}
-	if cfg == nil {
-		t.Error("Expected non-nil config")
-	}
-}
