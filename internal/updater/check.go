@@ -30,6 +30,18 @@ import (
 	"time"
 )
 
+// FIXME(revert-before-upstream-merge): the updater is temporarily pointed at the
+// AW3i fork (CLI repo AW3i/cli, playbooks branch 3.x) so self-upgrade can be
+// tested against the fork. Once these changes are reviewed and merged into the
+// upstream project, revert cliRepo to "valet-sh/valet-sh-cli" and
+// playbookBranch to "master". See also selfupgrade.go which uses these consts.
+const (
+	// cliRepo is the GitHub repo (owner/name) that publishes the CLI releases.
+	cliRepo = "AW3i/cli"
+	// playbookBranch is the branch of the valet-sh Ansible repo to track.
+	playbookBranch = "3.x"
+)
+
 const (
 	// checkInterval is how often the GitHub API is consulted.
 	checkInterval = 7 * 24 * time.Hour
@@ -37,8 +49,8 @@ const (
 	// timestampFile records the last time the check ran.
 	timestampFile = "/usr/local/valet-sh/etc/.last_update_check"
 
-	// cliReleaseURL is the GitHub API endpoint for the latest valet-sh-cli release.
-	cliReleaseURL = "https://api.github.com/repos/valet-sh/valet-sh-cli/releases/latest"
+	// cliReleaseURL is the GitHub API endpoint for the latest CLI release.
+	cliReleaseURL = "https://api.github.com/repos/" + cliRepo + "/releases/latest"
 
 	// apiTimeout caps the HTTP call so a slow network never blocks the user.
 	apiTimeout = 3 * time.Second
@@ -137,7 +149,7 @@ func checkAnsibleUpdate(repoDir string) bool {
 		return false
 	}
 
-	cmd := exec.Command("git", "-C", repoDir, "fetch", "--quiet", "origin", "master")
+	cmd := exec.Command("git", "-C", repoDir, "fetch", "--quiet", "origin", playbookBranch)
 	if err := cmd.Run(); err != nil {
 		return false
 	}
@@ -148,7 +160,7 @@ func checkAnsibleUpdate(repoDir string) bool {
 		return false
 	}
 
-	remoteHeadCmd := exec.Command("git", "-C", repoDir, "rev-parse", "origin/master")
+	remoteHeadCmd := exec.Command("git", "-C", repoDir, "rev-parse", "origin/"+playbookBranch)
 	remoteHead, err := remoteHeadCmd.Output()
 	if err != nil {
 		return false
