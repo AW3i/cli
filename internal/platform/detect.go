@@ -19,6 +19,7 @@ package platform
 import (
 	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 	"strings"
 )
@@ -122,6 +123,11 @@ func RepoDir() string {
 // Used to display a developer notice when running with a custom repo path.
 func DevRepoDir() string {
 	return os.Getenv(RepoDirEnvVar)
+}
+
+// LogFile returns the path to the ansible run log file.
+func LogFile() string {
+	return filepath.Join(RepoDir(), "log", "debug.log")
 }
 
 func isExecutable(path string) bool {
