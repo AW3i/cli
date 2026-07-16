@@ -128,7 +128,9 @@ func upgradeAnsibleIfNeeded(repoDir string) (bool, error) {
 	}
 
 	fmt.Printf("%s Checking for Ansible playbook updates...\n", blue("▶"))
-	cmd := exec.Command("git", "-C", repoDir, "fetch", "--quiet", "origin", "master")
+	// FIXME(revert-before-upstream-merge): tracks the fork's playbook branch
+	// (playbookBranch, see check.go). Revert to "master" once merged upstream.
+	cmd := exec.Command("git", "-C", repoDir, "fetch", "--quiet", "origin", playbookBranch)
 	if err := cmd.Run(); err != nil {
 		fmt.Printf("%s Could not fetch Ansible playbook updates\n", blue("ℹ"))
 		return false, nil
@@ -140,7 +142,7 @@ func upgradeAnsibleIfNeeded(repoDir string) (bool, error) {
 		return false, fmt.Errorf("failed to get local HEAD: %w", err)
 	}
 
-	remoteHeadCmd := exec.Command("git", "-C", repoDir, "rev-parse", "origin/master")
+	remoteHeadCmd := exec.Command("git", "-C", repoDir, "rev-parse", "origin/"+playbookBranch)
 	remoteHead, err := remoteHeadCmd.Output()
 	if err != nil {
 		return false, fmt.Errorf("failed to get remote HEAD: %w", err)
@@ -155,7 +157,7 @@ func upgradeAnsibleIfNeeded(repoDir string) (bool, error) {
 	}
 
 	fmt.Println("  Pulling latest Ansible playbooks...")
-	pullCmd := exec.Command("git", "-C", repoDir, "pull", "--quiet", "origin", "master")
+	pullCmd := exec.Command("git", "-C", repoDir, "pull", "--quiet", "origin", playbookBranch)
 	if err := pullCmd.Run(); err != nil {
 		return false, fmt.Errorf("failed to pull Ansible playbooks: %w", err)
 	}
@@ -167,7 +169,9 @@ func upgradeAnsibleIfNeeded(repoDir string) (bool, error) {
 // downloadAndVerifyBinary downloads the binary and checksums.txt from GitHub Releases,
 // verifies the SHA256 checksum, and returns the path to the downloaded binary.
 func downloadAndVerifyBinary(version, assetName string) (string, error) {
-	releaseURL := fmt.Sprintf("https://api.github.com/repos/valet-sh/valet-sh-cli/releases/download/%s", version)
+	// FIXME(revert-before-upstream-merge): uses the fork's release repo (cliRepo,
+	// see check.go). Revert to "valet-sh/valet-sh-cli" once merged upstream.
+	releaseURL := fmt.Sprintf("https://api.github.com/repos/%s/releases/download/%s", cliRepo, version)
 
 	tmpDir, err := os.MkdirTemp("", "valet-upgrade-*")
 	if err != nil {

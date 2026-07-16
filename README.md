@@ -354,6 +354,23 @@ All commands follow the same runtime pattern:
 
 ---
 
+## ⚠️ Fork/testing state — REVERT BEFORE UPSTREAM MERGE
+
+While testing the 3.x CLI against the AW3i forks, several things are temporarily
+pointed at the fork instead of upstream. **These must be reverted once the work
+is reviewed and merged into the upstream project:**
+
+- `internal/updater/check.go` — `cliRepo = "AW3i/cli"` and
+  `playbookBranch = "3.x"` (revert to `valet-sh/valet-sh-cli` and `master`).
+  `selfupgrade.go` reuses these constants; grep for
+  `FIXME(revert-before-upstream-merge)`.
+- `install.sh` — default `VSH_CLI_REPO` / `VSH_PLAYBOOK_REPO` /
+  `VSH_PLAYBOOK_BRANCH` point at the AW3i fork + `3.x` (all env-overridable).
+
+Search the repo for `FIXME(revert-before-upstream-merge)` to find every spot.
+
+---
+
 ## License
 
 Apache 2.0 — see repository root for full license text.
