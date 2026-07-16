@@ -174,30 +174,7 @@ func RunSubprocess(opts *RunOpts) (*exec.Cmd, io.Reader, func(), error) {
 	ansibleBin := platform.AnsiblePlaybookBin()
 	repoDir := platform.RepoDir()
 
-	// Write extra-vars to a temp file to keep them out of ps aux output.
-	evFile, err := os.CreateTemp("", "valetsh-vars-*")
-	if err != nil {
-		return nil, nil, nil, fmt.Errorf("creating extra-vars file: %w", err)
-	}
-	evPath := evFile.Name()
-	cleanup := func() { os.Remove(evPath) }
-
-	if err := os.Chmod(evPath, 0600); err != nil {
-		evFile.Close()
-		cleanup()
-		return nil, nil, nil, fmt.Errorf("setting extra-vars file permissions: %w", err)
-	}
-	if _, err := evFile.Write(extraVarsJSON); err != nil {
-		evFile.Close()
-		cleanup()
-		return nil, nil, nil, fmt.Errorf("writing extra-vars file: %w", err)
-	}
-	if err := evFile.Close(); err != nil {
-		cleanup()
-		return nil, nil, nil, fmt.Errorf("closing extra-vars file: %w", err)
-	}
-
-	args := []string{playbookPath, "-e", "@" + evPath}
+	args := []string{playbookPath, "-e", string(extraVarsJSON)}
 	if opts.Verbose {
 		args = append(args, "-v")
 	}
@@ -232,9 +209,7 @@ func RunSubprocess(opts *RunOpts) (*exec.Cmd, io.Reader, func(), error) {
 		}
 	}
 
-	evCleanup := cleanup
-	cleanup = func() {
-		evCleanup()
+	cleanup := func() {
 		if logFile != nil {
 			logFile.Close()
 		}
