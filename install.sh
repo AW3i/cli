@@ -41,6 +41,9 @@ VSH_CLI_REPO="${VSH_CLI_REPO:-AW3i/cli}"
 VSH_PLAYBOOK_REPO="${VSH_PLAYBOOK_REPO:-AW3i/valet-sh}"
 VSH_PLAYBOOK_BRANCH="${VSH_PLAYBOOK_BRANCH:-3.x}"
 VSH_RUNTIME_REPO="${VSH_RUNTIME_REPO:-valet-sh/runtime}"
+# Optional: pin an exact CLI release tag (e.g. v3.0.1-dev). Empty = resolve the
+# newest published release (stable preferred, else newest incl. prereleases).
+VSH_CLI_VERSION="${VSH_CLI_VERSION:-}"
 
 INSTALL_BASE="/usr/local/valet-sh"
 INSTALL_BIN="${INSTALL_BASE}/bin/valet"
@@ -162,13 +165,24 @@ ok "Runtime venv installed at ${VENV_DIR}"
 # ---------------------------------------------------------------------------
 # 4. CLI binary (from GitHub release of the CLI repo)
 # ---------------------------------------------------------------------------
-RELEASE_URL="https://api.github.com/repos/${VSH_CLI_REPO}/releases/latest"
-info "Fetching latest ${VSH_CLI_REPO} release"
-RELEASE_JSON="$(curl -fsSL -H "Accept: application/vnd.github+json" "${RELEASE_URL}")" \
-    || die "failed to query releases API for ${VSH_CLI_REPO}"
-TAG="$(echo "${RELEASE_JSON}" | grep -o '"tag_name":[[:space:]]*"[^"]*"' | head -1 | cut -d'"' -f4)"
-[ -n "${TAG}" ] || die "no release found for ${VSH_CLI_REPO} (have you pushed a v* tag?)"
-ok "Latest release: ${TAG}"
+GH_API="https://api.github.com/repos/${VSH_CLI_REPO}"
+first_tag() { grep -o '"tag_name":[[:space:]]*"[^"]*"' | head -1 | cut -d'"' -f4; }
+
+if [ -n "${VSH_CLI_VERSION}" ]; then
+    TAG="${VSH_CLI_VERSION}"
+    info "Using pinned CLI release: ${TAG}"
+else
+    info "Resolving latest ${VSH_CLI_REPO} release"
+    # Prefer the latest *stable* release; /releases/latest excludes prereleases.
+    TAG="$(curl -fsSL -H "Accept: application/vnd.github+json" "${GH_API}/releases/latest" 2>/dev/null | first_tag || true)"
+    if [ -z "${TAG}" ]; then
+        # No stable release yet — fall back to the newest release overall,
+        # which includes prereleases (e.g. v3.0.1-dev). The list is newest-first.
+        TAG="$(curl -fsSL -H "Accept: application/vnd.github+json" "${GH_API}/releases" 2>/dev/null | first_tag || true)"
+    fi
+    [ -n "${TAG}" ] || die "no release found for ${VSH_CLI_REPO} (have you pushed a v* tag?)"
+    ok "Resolved release: ${TAG}"
+fi
 
 DOWNLOAD_BASE="https://github.com/${VSH_CLI_REPO}/releases/download/${TAG}"
 info "Downloading ${BINARY_NAME}"
