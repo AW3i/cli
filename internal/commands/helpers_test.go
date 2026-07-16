@@ -36,28 +36,6 @@ func TestMax(t *testing.T) {
 	}
 }
 
-func TestRequireArgs(t *testing.T) {
-	// This test verifies the validator is created correctly
-	// The actual behavior (help vs error) requires a full cobra command
-	// which calls os.Exit(), so we only test the function creation here
-
-	validator := requireArgs(1, 2)
-	if validator == nil {
-		t.Error("requireArgs(1, 2) returned nil")
-	}
-
-	// Note: Testing actual validation behavior requires mocking cobra.Command
-	// and intercepting os.Exit(), which is not practical in unit tests.
-	// The validator behavior is tested via integration tests.
-}
-
-func TestRequireMinArgs(t *testing.T) {
-	validator := requireMinArgs(2)
-	if validator == nil {
-		t.Error("requireMinArgs(2) returned nil")
-	}
-}
-
 func TestErrorPrefix(t *testing.T) {
 	// Test that ErrorPrefix formats the message
 	// In non-TTY mode (test environment), it should just return plain text with checkmark

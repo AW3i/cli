@@ -58,12 +58,4 @@ func LoadGlobal() (*GlobalConfig, error) {
 	return &cfg, nil
 }
 
-// LinksFile returns the path to the global links.yml file.
-func LinksFile() string {
-	return filepath.Join(GlobalConfigDir, "links.yml")
-}
 
-// ServicesFile returns the path to the global services.yml file.
-func ServicesFile() string {
-	return filepath.Join(GlobalConfigDir, "services.yml")
-}
