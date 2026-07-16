@@ -35,6 +35,15 @@ import (
 // startup on the first JSON task-start event, ensuring Ansible's vars_prompt
 // password input runs on the raw terminal. Non-TTY falls back to normal ansible.Run().
 func RunWithPanel(root *cobra.Command, args []string, version string) error {
+	// Let cobra handle help requests directly — bypassing the TUI path ensures
+	// the correct help text is shown rather than forwarding --help to ansible.
+	for _, arg := range args {
+		if arg == "--help" || arg == "-h" {
+			os.Args = append([]string{os.Args[0]}, args...)
+			return root.Execute()
+		}
+	}
+
 	if !IsTTY() {
 		os.Args = append([]string{os.Args[0]}, args...)
 		return root.Execute()
@@ -74,6 +83,9 @@ func waitForFirstJSONTask(r io.Reader) io.Reader {
 				if isJSONTaskStart(line) {
 					break
 				}
+				line = line[:0]
+			} else if b == '\r' {
+				// CR terminates spinner-text lines — reset without parsing.
 				line = line[:0]
 			} else {
 				line = append(line, b)
@@ -134,10 +146,10 @@ func runExecPanel(command, version string, proc *exec.Cmd, ansibleOut io.Reader,
 		return err
 	}
 
-	if fm, ok := final.(standaloneExecModel); ok {
-		if fm.execPanel.LogViewRequested() {
-			printLogView(fm.execPanel.LogLines())
-		}
+	fm, hasFinal := final.(standaloneExecModel)
+
+	if hasFinal && fm.execPanel.LogViewRequested() {
+		printLogView(fm.execPanel.LogLines())
 	}
 
 	if outputBuf.Len() > 0 {
@@ -145,14 +157,41 @@ func runExecPanel(command, version string, proc *exec.Cmd, ansibleOut io.Reader,
 		fmt.Println(outputBuf.String())
 	}
 
+	if hasFinal {
+		// Write accumulated log lines to debug.log so the file has human-readable
+		// content even when the JSONL callback is active (replacing the Python handler).
+		writeDebugLog(platform.LogFile(), fm.execPanel.LogLines())
+
+		if fm.execPanel.Err() != nil {
+			fmt.Fprintf(os.Stderr, "  log: %s\n", platform.LogFile())
+		}
+	}
+
 	if devDir := platform.DevRepoDir(); devDir != "" {
 		fmt.Fprintf(os.Stderr, "\n[dev] repo: %s\n", devDir)
 	}
 
-	if fm, ok := final.(standaloneExecModel); ok {
+	if hasFinal {
 		return fm.execPanel.Err()
 	}
 	return nil
+}
+
+// writeDebugLog appends formatted log lines to the debug log file.
+// Called after each TUI run to provide a human-readable record alongside
+// the stderr output already written during the run.
+func writeDebugLog(path string, lines []string) {
+	if len(lines) == 0 {
+		return
+	}
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+	if err != nil {
+		return
+	}
+	defer f.Close()
+	for _, line := range lines {
+		fmt.Fprintln(f, line)
+	}
 }
 
 // drainStdin discards any terminal capability-query responses left in stdin
@@ -211,9 +250,13 @@ func resolveRunOpts(root *cobra.Command, args []string) (*ansible.RunOpts, error
 		playbook = strings.SplitN(cmd.Use, " ", 2)[0]
 	}
 
+	var verbose bool
 	var positionalArgs, opts []string
 	for _, token := range remaining {
-		if strings.HasPrefix(token, "-") {
+		if token == "--verbose" || token == "-v" {
+			verbose = true
+			// Do not forward to opts — cobra's per-command flag, not a playbook opt.
+		} else if strings.HasPrefix(token, "-") {
 			opts = append(opts, token)
 		} else {
 			positionalArgs = append(positionalArgs, token)
@@ -230,6 +273,7 @@ func resolveRunOpts(root *cobra.Command, args []string) (*ansible.RunOpts, error
 		Args:     positionalArgs,
 		Opts:     opts,
 		WorkDir:  workDir,
+		Verbose:  verbose,
 	}, nil
 }
 

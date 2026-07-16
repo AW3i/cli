@@ -28,6 +28,7 @@ import (
 	"path/filepath"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/valet-sh/cli/internal/platform"
 )
@@ -203,8 +204,41 @@ func RunSubprocess(opts *RunOpts) (*exec.Cmd, io.Reader, func(), error) {
 
 	env := os.Environ()
 	env = setEnv(env, "OLDPWD", workDir)
-	// Force Python to write stdout unbuffered so spinner lines arrive in real time.
+	// Force Python to write stdout unbuffered so JSON events arrive in real time.
 	env = setEnv(env, "PYTHONUNBUFFERED", "1")
+	// Use the JSONL callback so the TUI receives structured events it can parse.
+	// This overrides stdout_callback = valet-sh in ansible.cfg for TUI invocations only.
+	env = setEnv(env, "ANSIBLE_STDOUT_CALLBACK", "ansible.posix.jsonl")
+
+	// When -d / --debug is passed, enable verbose callback output.
+	for _, opt := range opts.Opts {
+		if opt == "-d" || opt == "--debug" {
+			env = setEnv(env, "APPLICATION_DEBUG_INFO_ENABLED", "1")
+			break
+		}
+	}
+
+	// Open the log file and write a header. Truncated per run (matching the
+	// Python callback's doRollover behaviour). Stderr is redirected here so
+	// ansible startup errors (import failures, syntax errors) are captured too.
+	var logFile *os.File
+	logPath := platform.LogFile()
+	if err := os.MkdirAll(filepath.Dir(logPath), 0755); err == nil {
+		if lf, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644); err == nil {
+			logFile = lf
+			fmt.Fprintf(logFile, "---------------------------------------------\n")
+			fmt.Fprintf(logFile, "Log started on %s.\n", time.Now().Format(time.ANSIC))
+			fmt.Fprintf(logFile, "---------------------------------------------\n\n")
+		}
+	}
+
+	evCleanup := cleanup
+	cleanup = func() {
+		evCleanup()
+		if logFile != nil {
+			logFile.Close()
+		}
+	}
 
 	cmd := exec.Command(ansibleBin, args...)
 	cmd.Dir = repoDir
@@ -213,13 +247,13 @@ func RunSubprocess(opts *RunOpts) (*exec.Cmd, io.Reader, func(), error) {
 	// Pass stdin through so vars_prompt can read the password natively.
 	cmd.Stdin = os.Stdin
 
-	// Pipe stdout so the TUI can read task names in real time from JSON output.
+	// Pipe stdout so the TUI can read JSONL events in real time.
 	stdoutPipe, err := cmd.StdoutPipe()
 	if err != nil {
 		cleanup()
 		return nil, nil, nil, fmt.Errorf("creating stdout pipe: %w", err)
 	}
-	cmd.Stderr = nil
+	cmd.Stderr = logFile // nil if log file could not be opened — discards stderr
 
 	if err = cmd.Start(); err != nil {
 		cleanup()
