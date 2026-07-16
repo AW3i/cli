@@ -63,7 +63,7 @@ func RunWithPanel(root *cobra.Command, args []string, version string) error {
 	taskOut := waitForFirstJSONTask(ansibleOut)
 
 	commandStr := strings.Join(args, " ")
-	return runExecPanel(commandStr, version, proc, taskOut, cleanup, 0)
+	return runExecPanel(commandStr, version, proc, taskOut, cleanup)
 }
 
 // waitForFirstJSONTask reads JSON lines until it finds a task-start event,
@@ -122,19 +122,16 @@ func isJSONTaskStart(line []byte) bool {
 // readTaskCmd directly to a shared *bytes.Buffer, bypassing the BubbleTea
 // message queue so that tea.Quit cannot race ahead of ansibleOutputMsg
 // delivery. The buffer is printed after p.Run() returns.
-func runExecPanel(command, version string, proc *exec.Cmd, ansibleOut io.Reader, cleanup func(), totalTasks int) error {
-	// Get terminal size with fallback to 80x24.
+func runExecPanel(command, version string, proc *exec.Cmd, ansibleOut io.Reader, cleanup func()) error {
 	width, height := 80, 24
 	if w, h, err := term.GetSize(os.Stdout.Fd()); err == nil {
 		width, height = w, h
 	}
 
-	// Shared buffer: readTaskCmd goroutine writes vsh_stdout content here
-	// directly, outside the BubbleTea message queue.
 	var outputBuf bytes.Buffer
 
 	m := standaloneExecModel{
-		execPanel: NewExecModel(command, version, proc, ansibleOut, &outputBuf, cleanup, totalTasks, width, height),
+		execPanel: NewExecModel(command, version, proc, ansibleOut, &outputBuf, cleanup, width, height),
 	}
 
 	p := tea.NewProgram(m)

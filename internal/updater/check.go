@@ -84,20 +84,15 @@ func Check(currentVersion string, originalArgs []string) {
 
 	repoDir := "/usr/local/valet-sh/valet-sh"
 
-	// Check for CLI updates
 	cliNewer, cliLatest := checkCliUpdate(currentVersion)
-
-	// Check for Ansible playbook updates (only if repo exists)
 	ansibleNewer := checkAnsibleUpdate(repoDir)
 
-	// If neither has updates, we're done
 	if !cliNewer && !ansibleNewer {
 		return
 	}
 
 	fmt.Println()
 
-	// Prompt for CLI update if available
 	cliUpdated := false
 	if cliNewer {
 		printCliUpdatePrompt(currentVersion, cliLatest)
@@ -105,12 +100,11 @@ func Check(currentVersion string, originalArgs []string) {
 			fmt.Println()
 			cliUpdated = promptSelfUpgrade()
 		} else {
-			fmt.Println(info(fmt.Sprintf("Skipping. Run 'valet self-upgrade' to upgrade anytime.")))
+			fmt.Println(info("Skipping. Run 'valet self-upgrade' to upgrade anytime."))
 			fmt.Println()
 		}
 	}
 
-	// Prompt for Ansible update if available (and didn't already update CLI)
 	if ansibleNewer && !cliUpdated {
 		printAnsibleUpdatePrompt()
 		if askYesNo() {
@@ -122,7 +116,6 @@ func Check(currentVersion string, originalArgs []string) {
 		}
 	}
 
-	// If CLI was updated, re-exec the original command with the new binary
 	if cliUpdated {
 		reExec(originalArgs)
 	}
@@ -139,20 +132,16 @@ func checkCliUpdate(currentVersion string) (bool, string) {
 
 // checkAnsibleUpdate returns true if the Ansible repo has updates available.
 func checkAnsibleUpdate(repoDir string) bool {
-	// Check if the repo directory exists and is a git repo
 	gitDir := filepath.Join(repoDir, ".git")
 	if _, err := os.Stat(gitDir); err != nil {
 		return false
 	}
 
-	// Fetch from remote to check if there are updates
 	cmd := exec.Command("git", "-C", repoDir, "fetch", "--quiet", "origin", "master")
 	if err := cmd.Run(); err != nil {
-		// Silently skip if fetch fails
 		return false
 	}
 
-	// Compare local HEAD with remote HEAD
 	localHeadCmd := exec.Command("git", "-C", repoDir, "rev-parse", "HEAD")
 	localHead, err := localHeadCmd.Output()
 	if err != nil {

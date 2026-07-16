@@ -50,10 +50,6 @@ type tuiStyles struct {
 	InputGhostPrompt lipgloss.Style
 	InputText        lipgloss.Style
 
-	DescTitle lipgloss.Style
-	DescBody  lipgloss.Style
-
-	ItemNormal   lipgloss.Style
 	ItemSelected lipgloss.Style
 	ItemDim      lipgloss.Style
 
@@ -62,13 +58,6 @@ type tuiStyles struct {
 	HelpKey  lipgloss.Style
 	HelpDesc lipgloss.Style
 	HelpSep  lipgloss.Style
-
-	// Arg input pane (args.go — kept for future use)
-	ArgPaneTitle  lipgloss.Style
-	ArgLabel      lipgloss.Style
-	ArgInput      lipgloss.Style
-	ArgInputFocus lipgloss.Style
-	ArgHint       lipgloss.Style
 }
 
 func newStyles() tuiStyles {
@@ -110,16 +99,6 @@ func newStyles() tuiStyles {
 		InputText: lipgloss.NewStyle().
 			Foreground(colourText),
 
-		DescTitle: lipgloss.NewStyle().
-			Bold(true).
-			Foreground(colourBlue),
-
-		DescBody: lipgloss.NewStyle().
-			Foreground(colourText),
-
-		ItemNormal: lipgloss.NewStyle().
-			Foreground(colourText),
-
 		ItemSelected: lipgloss.NewStyle().
 			Bold(true).
 			Foreground(colourGreen),
@@ -137,22 +116,6 @@ func newStyles() tuiStyles {
 			Foreground(colourDim),
 
 		HelpSep: lipgloss.NewStyle().
-			Foreground(colourDim),
-
-		ArgPaneTitle: lipgloss.NewStyle().
-			Bold(true).
-			Foreground(colourBlue),
-
-		ArgLabel: lipgloss.NewStyle().
-			Foreground(colourDim),
-
-		ArgInput: lipgloss.NewStyle().
-			Foreground(colourText),
-
-		ArgInputFocus: lipgloss.NewStyle().
-			Foreground(colourGreen),
-
-		ArgHint: lipgloss.NewStyle().
 			Foreground(colourDim),
 	}
 }

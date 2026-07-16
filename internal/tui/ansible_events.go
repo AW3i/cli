@@ -213,21 +213,6 @@ func formatCmd(raw json.RawMessage) string {
 	return string(raw)
 }
 
-// parseLogTaskName extracts the task name from a log line like:
-// "TASK [role-name : task-name] ****..."
-// Returns the part between brackets, or empty string if not found.
-func parseLogTaskName(line string) string {
-	start := strings.Index(line, "[")
-	if start == -1 {
-		return ""
-	}
-	end := strings.Index(line, "]")
-	if end == -1 || end <= start {
-		return ""
-	}
-	return strings.TrimSpace(line[start+1 : end])
-}
-
 // isMetaTask returns true if the task name represents an Ansible meta-task
 // that controls flow (include_tasks, import_tasks, etc.) rather than doing real work.
 // These tasks execute instantly and should not be shown as "current task" since
@@ -239,7 +224,6 @@ func isMetaTask(taskName string) bool {
 		base = taskName[i+3:]
 	}
 
-	// Check if it's a meta-task
 	switch base {
 	case "include_tasks", "import_tasks", "include_role", "import_role":
 		return true

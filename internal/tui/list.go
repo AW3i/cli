@@ -335,6 +335,5 @@ func renderInlineHelpBar(width int) string {
 		}
 	}
 
-	_ = width
 	return strings.Join(parts, " ")
 }

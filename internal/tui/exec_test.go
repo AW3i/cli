@@ -26,7 +26,7 @@ import (
 )
 
 func TestExecModelInit(t *testing.T) {
-	m := NewExecModel("service start php83", "1.0.0", nil, nil, nil, nil, 0, 80, 24)
+	m := NewExecModel("service start php83", "1.0.0", nil, nil, nil, nil, 80, 24)
 	cmd := m.Init()
 	if cmd == nil {
 		t.Error("Init() should return a non-nil Cmd (tick + wait)")
@@ -34,7 +34,7 @@ func TestExecModelInit(t *testing.T) {
 }
 
 func TestExecModelDoneOnExecDoneMsg(t *testing.T) {
-	m := NewExecModel("install", "1.0.0", nil, nil, nil, nil, 0, 80, 24)
+	m := NewExecModel("install", "1.0.0", nil, nil, nil, nil, 80, 24)
 
 	rm, _ := m.Update(execDoneMsg{err: nil})
 
@@ -51,7 +51,7 @@ func TestExecModelDoneOnExecDoneMsg(t *testing.T) {
 }
 
 func TestExecModelFailedExecDoneMsg(t *testing.T) {
-	m := NewExecModel("service start php83", "1.0.0", nil, nil, nil, nil, 0, 80, 24)
+	m := NewExecModel("service start php83", "1.0.0", nil, nil, nil, nil, 80, 24)
 	sentinel := errors.New("exit status 1")
 
 	rm, _ := m.Update(execDoneMsg{err: sentinel})
@@ -69,7 +69,7 @@ func TestExecModelFailedExecDoneMsg(t *testing.T) {
 }
 
 func TestExecModelLogPromptYesOpensViewer(t *testing.T) {
-	m := NewExecModel("install", "1.0.0", nil, nil, nil, nil, 0, 80, 24)
+	m := NewExecModel("install", "1.0.0", nil, nil, nil, nil, 80, 24)
 
 	// Trigger failure.
 	m, _ = m.Update(execDoneMsg{err: errors.New("exit status 1")})
@@ -88,7 +88,7 @@ func TestExecModelLogPromptYesOpensViewer(t *testing.T) {
 }
 
 func TestExecModelLogPromptEnterOpensViewer(t *testing.T) {
-	m := NewExecModel("install", "1.0.0", nil, nil, nil, nil, 0, 80, 24)
+	m := NewExecModel("install", "1.0.0", nil, nil, nil, nil, 80, 24)
 	m, _ = m.Update(execDoneMsg{err: errors.New("exit status 1")})
 
 	// Any other key triggers the prompt; then Enter confirms.
@@ -109,7 +109,7 @@ func TestExecModelLogPromptEnterOpensViewer(t *testing.T) {
 }
 
 func TestExecModelLogPromptNoQuits(t *testing.T) {
-	m := NewExecModel("install", "1.0.0", nil, nil, nil, nil, 0, 80, 24)
+	m := NewExecModel("install", "1.0.0", nil, nil, nil, nil, 80, 24)
 	m, _ = m.Update(execDoneMsg{err: errors.New("exit status 1")})
 
 	// Show prompt with any neutral key, then press N.
@@ -124,7 +124,7 @@ func TestExecModelLogPromptNoQuits(t *testing.T) {
 }
 
 func TestExecModelLogPromptEscQuits(t *testing.T) {
-	m := NewExecModel("install", "1.0.0", nil, nil, nil, nil, 0, 80, 24)
+	m := NewExecModel("install", "1.0.0", nil, nil, nil, nil, 80, 24)
 	m, _ = m.Update(execDoneMsg{err: errors.New("exit status 1")})
 
 	_, cmd := m.Update(tea.KeyPressMsg{Text: "esc"})
@@ -136,10 +136,9 @@ func TestExecModelLogPromptEscQuits(t *testing.T) {
 
 
 func TestExecModelTaskCounting(t *testing.T) {
-	m := NewExecModel("install", "1.0.0", nil, nil, nil, nil, 10, 80, 24)
+	m := NewExecModel("install", "1.0.0", nil, nil, nil, nil, 80, 24)
 
-	// Simulate task lines appearing in the log.
-	m.appendLine("TASK [Gathering Facts]")
+	m.appendLines([]string{"TASK [Gathering Facts]"})
 	if m.tasksDone != 1 {
 		t.Errorf("expected tasksDone=1, got %d", m.tasksDone)
 	}
@@ -155,10 +154,9 @@ func TestExecModelTaskCounting(t *testing.T) {
 }
 
 func TestLogLinesAccumulation(t *testing.T) {
-	m := NewExecModel("install", "1.0.0", nil, nil, nil, nil, 0, 80, 24)
+	m := NewExecModel("install", "1.0.0", nil, nil, nil, nil, 80, 24)
 
-	m.appendLine("TASK [Gathering Facts] ****")
-	m.appendLine("ok: [localhost]")
+	m.appendLines([]string{"TASK [Gathering Facts] ****", "ok: [localhost]"})
 	m.appendLines([]string{"TASK [Install deps] ****", "changed: [localhost]"})
 
 	if len(m.logLines) != 4 {
@@ -173,21 +171,20 @@ func TestExecModelProgressBarRendering(t *testing.T) {
 	tests := []struct {
 		name        string
 		tasksDone   int
-		totalTasks  int
 		done        bool
 		err         error
 		currentTask string
 		expectedIn  string // What we expect to find in the view (after shortening)
 	}{
-		{"spinner with no task", 5, 0, false, nil, "", "running..."},
-		{"spinner with task", 10, 20, false, nil, "my : task", "task"}, // "my : task" gets shortened to "task"
-		{"success state", 20, 20, true, nil, "", "✔"},
-		{"failure state", 15, 20, true, errors.New("fail"), "", "✘"},
+		{"spinner with no task", 5, false, nil, "", "running..."},
+		{"spinner with task", 10, false, nil, "my : task", "task"}, // "my : task" gets shortened to "task"
+		{"success state", 20, true, nil, "", "✔"},
+		{"failure state", 15, true, errors.New("fail"), "", "✘"},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			m := NewExecModel("install", "1.0.0", nil, nil, nil, nil, tc.totalTasks, 80, 24)
+			m := NewExecModel("install", "1.0.0", nil, nil, nil, nil, 80, 24)
 			m.tasksDone = tc.tasksDone
 			m.done = tc.done
 			m.err = tc.err
@@ -203,22 +200,19 @@ func TestExecModelProgressBarRendering(t *testing.T) {
 }
 
 func TestExecModelRenderProgressBarCalculations(t *testing.T) {
-	// The progress bar shows spinner + task name. Verify task name appears correctly.
-	// Note: task names are shortened to remove role prefix.
 	tasks := []struct {
 		tasksDone  int
-		totalTasks int
 		task       string
 		expectedIn string // What should appear in the view (shortened)
 	}{
-		{0, 20, "first : task", "task"},   // Shortened from "first : task"
-		{10, 20, "middle : task", "task"}, // Shortened from "middle : task"
-		{20, 20, "last : task", "task"},   // Shortened from "last : task"
+		{0, "first : task", "task"},   // Shortened from "first : task"
+		{10, "middle : task", "task"}, // Shortened from "middle : task"
+		{20, "last : task", "task"},   // Shortened from "last : task"
 	}
 
 	for _, tc := range tasks {
-		t.Run(fmt.Sprintf("%d_of_%d", tc.tasksDone, tc.totalTasks), func(t *testing.T) {
-			m := NewExecModel("install", "1.0.0", nil, nil, nil, nil, tc.totalTasks, 80, 24)
+		t.Run(fmt.Sprintf("tasks_%d", tc.tasksDone), func(t *testing.T) {
+			m := NewExecModel("install", "1.0.0", nil, nil, nil, nil, 80, 24)
 			m.tasksDone = tc.tasksDone
 			m.currentTask = tc.task
 
@@ -233,7 +227,7 @@ func TestExecModelRenderProgressBarCalculations(t *testing.T) {
 
 func TestExecModelProgressBarView(t *testing.T) {
 	// While running: should show spinner + task name (shortened).
-	m := NewExecModel("install", "1.0.0", nil, nil, nil, nil, 20, 80, 24)
+	m := NewExecModel("install", "1.0.0", nil, nil, nil, nil, 80, 24)
 	m.tasksDone = 10
 	m.currentTask = "some : task name"
 
@@ -250,14 +244,6 @@ func TestExecModelProgressBarView(t *testing.T) {
 	if !strings.Contains(view, "✔") {
 		t.Errorf("expected checkmark in completed bar, got: %s", view)
 	}
-}
-
-func makeLines(n int) []string {
-	lines := make([]string, n)
-	for i := range lines {
-		lines[i] = fmt.Sprintf("line %d", i+1)
-	}
-	return lines
 }
 
 func TestParseJSONEvent(t *testing.T) {
@@ -384,66 +370,6 @@ func TestParseJSONEvent(t *testing.T) {
 				if buf.Len() != 0 {
 					t.Errorf("expected empty buffer, got %q", buf.String())
 				}
-			}
-		})
-	}
-}
-
-func TestParseLogTaskName(t *testing.T) {
-	// Test parsing task names from debug.log format:
-	// "TASK [role-name : task-name] ****..."
-	tests := []struct {
-		name  string
-		input string
-		want  string
-	}{
-		{
-			name:  "typical task line",
-			input: "TASK [sudo-permission-check : Reset sudo session] ******************************",
-			want:  "sudo-permission-check : Reset sudo session",
-		},
-		{
-			name:  "task line with short role",
-			input: "TASK [shared-variables : set 'current_user', 'current_group' and 'current_home'] ***",
-			want:  "shared-variables : set 'current_user', 'current_group' and 'current_home'",
-		},
-		{
-			name:  "task with no role prefix",
-			input: "TASK [Gathering Facts] ****",
-			want:  "Gathering Facts",
-		},
-		{
-			name:  "empty brackets",
-			input: "TASK [] ****",
-			want:  "",
-		},
-		{
-			name:  "no opening bracket",
-			input: "TASK role-name : task-name] ****",
-			want:  "",
-		},
-		{
-			name:  "no closing bracket",
-			input: "TASK [role-name : task-name ****",
-			want:  "",
-		},
-		{
-			name:  "not a task line (but still has brackets) — parseLogTaskName extracts anyway",
-			input: "PLAY [some play] ****",
-			want:  "some play",
-		},
-		{
-			name:  "empty input",
-			input: "",
-			want:  "",
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			got := parseLogTaskName(tc.input)
-			if got != tc.want {
-				t.Errorf("parseLogTaskName(%q) = %q, want %q", tc.input, got, tc.want)
 			}
 		})
 	}
@@ -722,7 +648,7 @@ func TestIsJSONTaskStart(t *testing.T) {
 // — ensuring vsh_stdout has been fully written to the output buffer before
 // p.Run() returns.
 func TestExecModelQuitAfterStdoutDrained(t *testing.T) {
-	m := NewExecModel("service list", "1.0.0", nil, nil, nil, nil, 0, 80, 24)
+	m := NewExecModel("service list", "1.0.0", nil, nil, nil, nil, 80, 24)
 	m.done = false
 
 	// Simulate execDoneMsg arriving (process exited, success).
@@ -751,7 +677,7 @@ func TestExecModelQuitAfterStdoutDrained(t *testing.T) {
 func TestExecModelNoQuitOnDoneWithoutEOF(t *testing.T) {
 	// Use a real (blocking) pipe so readTaskCmd is re-queued rather than returning nil.
 	pr, _ := io.Pipe()
-	m := NewExecModel("service list", "1.0.0", nil, pr, nil, nil, 0, 80, 24)
+	m := NewExecModel("service list", "1.0.0", nil, pr, nil, nil, 80, 24)
 
 	// execDoneMsg: should mark done but NOT quit.
 	em, cmd := m.Update(execDoneMsg{err: nil})

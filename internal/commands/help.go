@@ -109,7 +109,7 @@ func helpFunc() func(*cobra.Command, []string) {
 			_, _ = fmt.Fprintln(w, blue(w, "▶ Available Commands"))
 			for _, sub := range cmd.Commands() {
 				if sub.IsAvailableCommand() {
-					padding := strings.Repeat(" ", maxInt(1, 14-len(sub.Name())))
+					padding := strings.Repeat(" ", max(1, 14-len(sub.Name())))
 					_, _ = fmt.Fprintf(w, "  %s%s%s\n",
 						green(w, sub.Name()),
 						padding,
@@ -142,10 +142,4 @@ func helpFunc() func(*cobra.Command, []string) {
 	}
 }
 
-// maxInt returns the larger of a and b (stdlib max requires Go 1.21+).
-func maxInt(a, b int) int {
-	if a > b {
-		return a
-	}
-	return b
-}
+

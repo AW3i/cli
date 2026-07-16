@@ -29,8 +29,6 @@ import (
 var Version = "dev"
 
 func main() {
-	// Check for --vi / -vi flag before cobra parses args so we can launch
-	// the TUI in vim mode directly.
 	vimMode := hasVIFlag(os.Args)
 	if vimMode {
 		os.Args = removeVIFlag(os.Args)
@@ -74,7 +72,6 @@ func main() {
 	}
 }
 
-// hasVIFlag returns true if os.Args contains --vi or -vi.
 func hasVIFlag(args []string) bool {
 	for _, a := range args[1:] {
 		if a == "--vi" || a == "-vi" {
@@ -84,7 +81,6 @@ func hasVIFlag(args []string) bool {
 	return false
 }
 
-// removeVIFlag returns args with all --vi / -vi occurrences removed.
 func removeVIFlag(args []string) []string {
 	result := make([]string, 0, len(args))
 	for _, a := range args {
@@ -142,24 +138,6 @@ Configuration is driven by a .valet-sh.yml file in each project directory.`,
 		commands.ApplyHooks(discovered)
 		cmd.AddCommand(discovered...)
 	}
-
-	// Add built-in self-upgrade command
-	cmd.AddCommand(&cobra.Command{
-		Use:   "self-upgrade",
-		Short: "Check for and apply updates to valet-sh CLI and playbooks",
-		Long: `self-upgrade checks for new versions of both the valet-sh CLI and the
-Ansible playbook repository, and applies updates if available.
-
-It performs the following:
-  1. Checks the valet-sh-cli GitHub releases for a newer CLI binary
-  2. Checks the valet-sh GitHub repository for playbook updates
-  3. Downloads and installs updates with SHA256 verification
-  4. Re-executes your original command with the updated CLI if needed`,
-		SilenceUsage: true,
-		RunE: func(cmd *cobra.Command, _ []string) error {
-			return updater.SelfUpgrade(Version, os.Args, platform.RepoDir())
-		},
-	})
 
 	return cmd
 }

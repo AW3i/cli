@@ -16,7 +16,6 @@ package tui
 
 import (
 	"bytes"
-	"encoding/base64"
 	"fmt"
 	"io"
 	"os"
@@ -94,12 +93,6 @@ type ExecModel struct {
 	// non-meta-task (what Ansible is currently doing).
 	currentTask string
 
-	// totalTasks is the total number of tasks that will be executed,
-	// determined by ansible-playbook --list-tasks before the run.
-	// Zero means the count is unknown (e.g. --list-tasks failed), so we
-	// fall back to a simple spinner without a progress bar.
-	totalTasks int
-
 	// spinnerFrame is the current index into the spinner animation frames.
 	// Advances on every execTickMsg while the process is running.
 	spinnerFrame int
@@ -132,13 +125,12 @@ type ExecModel struct {
 
 // NewExecModel creates a new ExecModel ready to run.
 // proc must already be started via ansible.RunSubprocess().
-// cleanup is a function that deletes temporary files (passwords, extra-vars) after the process exits.
-// totalTasks is the total number of tasks (from --list-tasks), or 0 if unknown.
+// cleanup is called after the process exits to release resources.
 // width/height are the dimensions of the panel area.
 // output is a shared *bytes.Buffer that readTaskCmd writes vsh_stdout content
 // to directly (bypassing the BubbleTea message queue). The caller reads from
 // it after p.Run() returns to print tables/listings to the terminal.
-func NewExecModel(command, version string, proc *exec.Cmd, ansibleOut io.Reader, output *bytes.Buffer, cleanup func(), totalTasks, width, height int) ExecModel {
+func NewExecModel(command, version string, proc *exec.Cmd, ansibleOut io.Reader, output *bytes.Buffer, cleanup func(), width, height int) ExecModel {
 	return ExecModel{
 		command:    command,
 		version:    version,
@@ -146,7 +138,6 @@ func NewExecModel(command, version string, proc *exec.Cmd, ansibleOut io.Reader,
 		ansibleOut: ansibleOut,
 		output:     output,
 		cleanup:    cleanup,
-		totalTasks: totalTasks,
 		width:      width,
 		height:     height,
 	}
@@ -215,7 +206,6 @@ func (e ExecModel) Update(msg tea.Msg) (ExecModel, tea.Cmd) {
 		return e, nil
 	}
 
-	// All other states consume the message but don't update anything.
 	return e, nil
 }
 
@@ -267,7 +257,6 @@ func (e ExecModel) handleKey(msg tea.KeyPressMsg) (ExecModel, tea.Cmd) {
 	return e, tea.Quit
 }
 
-// View renders the CLI view.
 func (e ExecModel) View() string {
 	return e.cliView()
 }
@@ -331,29 +320,6 @@ func (e ExecModel) progressBarView() string {
 	return spinner + counter
 }
 
-func (e ExecModel) statusLines() string {
-	if !e.done {
-		return styles.HelpDesc.Render("⠋ running...   ↑/↓ scroll   C copy")
-	}
-
-	if e.err != nil {
-		failLine := lipgloss.NewStyle().Foreground(colourRed).Bold(true).Render(
-			"✘ failed",
-		)
-		if e.awaitingLogPrompt {
-			promptLine := styles.HelpDesc.Render("View full log? ") +
-				styles.HelpKey.Render("[Y]") +
-				styles.HelpDesc.Render("/") +
-				styles.ItemDim.Render("n")
-			return failLine + "\n" + promptLine
-		}
-		return failLine + "\n" + styles.HelpDesc.Render("(press y to view log, C to copy, any other key to exit)")
-	}
-
-	return styles.ItemSelected.Render("✔ done") +
-		"   " + styles.HelpDesc.Render("(press C to copy or any key to exit)")
-}
-
 // IsDone returns true once the subprocess has exited.
 func (e ExecModel) IsDone() bool { return e.done }
 
@@ -367,27 +333,6 @@ func (e ExecModel) LogViewRequested() bool { return e.logViewRequested }
 // LogLines returns the accumulated formatted log lines.
 // Typically used after BubbleTea exits to display the log via printLogView().
 func (e ExecModel) LogLines() []string { return e.logLines }
-
-// copyToClipboardOSC52 copies the given text to the system clipboard using the
-// OSC 52 escape sequence. This works in modern terminals like iTerm2, Kitty,
-// WezTerm, Alacritty, and tmux (with set-clipboard on). If the terminal doesn't
-// support OSC 52, this is silently ignored.
-//
-// Format: \033]52;c;<base64-encoded-text>\007
-func copyToClipboardOSC52(text string) {
-	encoded := base64.StdEncoding.EncodeToString([]byte(text))
-	oscSeq := "\033]52;c;" + encoded + "\007"
-	_, _ = os.Stdout.WriteString(oscSeq)
-}
-
-// appendLine appends a single line to the logLines accumulator,
-// and advances the task counter when a TASK-prefix line is seen.
-func (e *ExecModel) appendLine(line string) {
-	if strings.HasPrefix(line, taskLogPrefix) {
-		e.tasksDone++
-	}
-	e.logLines = append(e.logLines, line)
-}
 
 // appendLines appends multiple lines to the logLines accumulator,
 // counting TASK-prefix lines to advance the task counter.

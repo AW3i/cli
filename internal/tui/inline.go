@@ -47,15 +47,7 @@ const (
 //
 // The box is always in "insert mode" — there is no modal switching.
 type InlineBox struct {
-	// commandPath is the full command path, e.g. "service" or "project env".
-	// Used as the non-editable prompt prefix.
-	commandPath string
-
-	// docs is the full documentation text (Long or Short description),
-	// pre-wrapped to fit the box width.
-	docs string
-
-	// docsLines is docs split into individual lines for scrolling.
+	// docsLines holds the wrapped documentation lines for scrolling.
 	docsLines []string
 
 	// docsOffset is the current scroll position (index of first visible line).
@@ -94,12 +86,9 @@ func NewInlineBox(commandPath, docs string, width int) InlineBox {
 	inp.Focus()
 
 	return InlineBox{
-		commandPath: commandPath,
-		docs:        docs,
-		docsLines:   docLines,
-		docsOffset:  0,
-		input:       inp,
-		width:       width,
+		docsLines: docLines,
+		input:     inp,
+		width:     width,
 	}
 }
 
