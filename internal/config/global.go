@@ -57,5 +57,3 @@ func LoadGlobal() (*GlobalConfig, error) {
 
 	return &cfg, nil
 }
-
-

@@ -15,8 +15,8 @@
 package updater
 
 import (
-	"testing"
 	"os"
+	"testing"
 )
 
 func TestUpdateChannel(t *testing.T) {

@@ -113,5 +113,3 @@ func isExecutable(path string) bool {
 	}
 	return info.Mode()&0o111 != 0
 }
-
-
