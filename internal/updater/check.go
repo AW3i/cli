@@ -56,8 +56,13 @@ const (
 	// created_at descending. Used by the dev channel.
 	cliReleasesURL = "https://api.github.com/repos/" + cliRepo + "/releases"
 
-	// apiTimeout caps the HTTP call so a slow network never blocks the user.
+	// apiTimeout caps the background-check HTTP call so a slow network never
+	// blocks the user mid-command.
 	apiTimeout = 3 * time.Second
+
+	// upgradeAPITimeout is used for explicit 'valet self-upgrade' invocations
+	// where the user is actively waiting and a longer round-trip is acceptable.
+	upgradeAPITimeout = 15 * time.Second
 
 	// UpdateChannelEnvVar is the environment variable that controls which
 	// release channel is tracked. Accepted values: "stable" (default), "dev".
@@ -143,7 +148,7 @@ func Check(currentVersion string, originalArgs []string, repoDir string) {
 
 // checkCliUpdate returns true if a newer CLI version is available, along with the latest tag.
 func checkCliUpdate(currentVersion string) (bool, string) {
-	latest, err := fetchLatestCliTag()
+	latest, err := fetchLatestCliTag(apiTimeout)
 	if err != nil {
 		return false, ""
 	}
@@ -220,18 +225,20 @@ func updateChannel() string {
 	return "stable"
 }
 
-// fetchLatestCliTag returns the latest tag for the configured channel.
-func fetchLatestCliTag() (string, error) {
+// fetchLatestCliTag returns the latest tag for the configured channel using
+// the given HTTP timeout. Pass apiTimeout for background checks, upgradeAPITimeout
+// for explicit self-upgrade invocations.
+func fetchLatestCliTag(timeout time.Duration) (string, error) {
 	if updateChannel() == "dev" {
-		return fetchLatestAnyTag()
+		return fetchLatestAnyTag(timeout)
 	}
-	return fetchLatestStableTag()
+	return fetchLatestStableTag(timeout)
 }
 
 // fetchLatestStableTag queries /releases/latest — GitHub only returns
 // non-prerelease, non-draft releases from this endpoint.
-func fetchLatestStableTag() (string, error) {
-	resp, err := githubGet(cliReleaseStableURL)
+func fetchLatestStableTag(timeout time.Duration) (string, error) {
+	resp, err := githubGet(cliReleaseStableURL, timeout)
 	if err != nil {
 		return "", err
 	}
@@ -250,8 +257,8 @@ func fetchLatestStableTag() (string, error) {
 
 // fetchLatestAnyTag queries /releases (full list, newest first) and returns
 // the first non-draft entry — stable or pre-release.
-func fetchLatestAnyTag() (string, error) {
-	resp, err := githubGet(cliReleasesURL)
+func fetchLatestAnyTag(timeout time.Duration) (string, error) {
+	resp, err := githubGet(cliReleasesURL, timeout)
 	if err != nil {
 		return "", err
 	}
@@ -275,8 +282,8 @@ func fetchLatestAnyTag() (string, error) {
 }
 
 // githubGet performs a GET request to the GitHub API with the standard headers.
-func githubGet(url string) (*http.Response, error) {
-	client := &http.Client{Timeout: apiTimeout}
+func githubGet(url string, timeout time.Duration) (*http.Response, error) {
+	client := &http.Client{Timeout: timeout}
 	req, err := http.NewRequest(http.MethodGet, url, http.NoBody)
 	if err != nil {
 		return nil, err

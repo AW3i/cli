@@ -36,17 +36,19 @@ func SelfUpgrade(currentVersion string, originalArgs []string, repoDir string) e
 	fmt.Println(blue("▶ Checking for updates..."))
 	fmt.Println()
 
-	cliUpdated, err := upgradeCliIfNeeded(currentVersion)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "%s CLI update check failed: %v\n", ansiRed+"✘"+ansiReset, err)
+	cliUpdated, cliErr := upgradeCliIfNeeded(currentVersion)
+	if cliErr != nil {
+		fmt.Fprintf(os.Stderr, "%s CLI update check failed: %v\n", ansiRed+"✘"+ansiReset, cliErr)
 	}
 
-	ansibleUpdated, err := upgradeAnsibleIfNeeded(repoDir)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "%s Ansible playbook update failed: %v\n", ansiRed+"✘"+ansiReset, err)
+	ansibleUpdated, ansibleErr := upgradeAnsibleIfNeeded(repoDir)
+	if ansibleErr != nil {
+		fmt.Fprintf(os.Stderr, "%s Ansible playbook update failed: %v\n", ansiRed+"✘"+ansiReset, ansibleErr)
 	}
 
-	if !cliUpdated && !ansibleUpdated {
+	// Only say "everything is up to date" when both checks succeeded and
+	// neither component was updated — not when a check failed.
+	if cliErr == nil && ansibleErr == nil && !cliUpdated && !ansibleUpdated {
 		fmt.Println(green("✓ Everything is up to date."))
 		fmt.Println()
 		return nil
@@ -72,7 +74,7 @@ func upgradeCliIfNeeded(currentVersion string) (bool, error) {
 		return false, nil
 	}
 
-	latest, err := fetchLatestCliTag()
+	latest, err := fetchLatestCliTag(upgradeAPITimeout)
 	if err != nil {
 		return false, err
 	}
