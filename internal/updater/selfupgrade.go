@@ -180,7 +180,7 @@ func upgradeAnsibleIfNeeded(repoDir string) (bool, error) {
 func downloadAndVerifyBinary(version, assetName string) (string, error) {
 	// FIXME(revert-before-upstream-merge): uses the fork's release repo (cliRepo,
 	// see check.go). Revert to "valet-sh/valet-sh-cli" once merged upstream.
-	releaseURL := fmt.Sprintf("https://api.github.com/repos/%s/releases/download/%s", cliRepo, version)
+	releaseURL := fmt.Sprintf("https://github.com/%s/releases/download/%s", cliRepo, version)
 
 	tmpDir, err := os.MkdirTemp("", "valet-upgrade-*")
 	if err != nil {
