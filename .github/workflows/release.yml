@@ -31,7 +31,7 @@ name: Release
 on:
   push:
     tags:
-      - "v*"
+      - "[0-9]*"
 
 permissions:
   contents: write   # required to create GitHub Releases and upload assets
