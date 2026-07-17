@@ -64,7 +64,7 @@ fmt-check:
 	@echo "All files properly formatted"
 
 ## lint: Run golangci-lint (auto-installs if not present)
-LINT_VERSION := v1.64.8
+LINT_VERSION := v2.12.2
 LINT_BIN := $(shell go env GOPATH)/bin/golangci-lint
 
 lint: $(LINT_BIN)
