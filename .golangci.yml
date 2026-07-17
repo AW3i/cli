@@ -18,124 +18,73 @@ version: "2"
 
 run:
   timeout: 5m
-  issues-exit-code: 1
-  tests: true
-
-output:
-  print-issued-lines: true
-  print-linter-name: true
-
-linters-settings:
-  errcheck:
-    check-type-assertions: true
-    check-blank: true
-  govet:
-    enable:
-      - shadow
-  gocyclo:
-    min-complexity: 15
-  dupl:
-    threshold: 100
-  goconst:
-    min-len: 3
-    min-occurrences: 3
-  misspell:
-    locale: US
-  lll:
-    line-length: 120
-  goimports:
-    local-prefixes: github.com/valet-sh/valet-sh/cli
-  gocritic:
-    enabled-tags:
-      - performance
-      - style
-      - experimental
-    disabled-checks:
-      - wrapperFunc
-      - dupImport
-  funlen:
-    lines: 100
-    statements: 50
-  cyclop:
-    max-complexity: 15
-  nestif:
-    min-complexity: 5
 
 linters:
-  disable-all: true
+  default: none
   enable:
-    # Default critical linters (always enabled)
     - errcheck
     - govet
     - ineffassign
     - staticcheck
     - unused
-    # Additional security/quality
     - gosec
     - gocritic
     - bodyclose
     - dogsled
     - unparam
+  settings:
+    errcheck:
+      check-type-assertions: true
+      check-blank: true
+    govet:
+      enable:
+        - shadow
+    gocritic:
+      enabled-tags:
+        - performance
+        - style
+        - experimental
+      disabled-checks:
+        - wrapperFunc
+        - dupImport
+  exclusions:
+    presets: []
+    paths:
+      - "internal/config/global.go"
+      - "internal/config/project.go"
+    rules:
+      - path: _test\.go
+        linters: [gocyclo, errcheck, dupl, gosec, lll, funlen]
+      - path: cmd/valet/main.go
+        text: "os.Exit"
+        linters: [gocritic]
+      - text: "weak cryptographic primitive"
+        linters: [gosec]
+      - text: "G107"
+        linters: [gosec]
+      # syscall.Exec is intentional and documented
+      - text: "G204"
+        linters: [gosec]
+      # logPath is a hardcoded constant, not user input
+      - path: internal/tui/exec.go
+        text: "G304"
+        linters: [gosec]
+      # Intentional blank assignments for best-effort operations
+      - path: internal/commands/help.go
+        linters: [errcheck]
+      - path: internal/commands/helpers.go
+        linters: [errcheck]
+      - path: internal/updater/check.go
+        linters: [errcheck]
+      # Bubble Tea Elm architecture requires value receivers — hugeParam is expected
+      - path: internal/tui/
+        text: "hugeParam"
+        linters: [gocritic]
+      - path: internal/tui/exec.go
+        linters: [errcheck]
+      - path: internal/tui/runner.go
+        linters: [errcheck]
 
 issues:
-  exclude-files:
-    # Exclude files with typecheck issues from typecheck linter
-    - "internal/config/global.go"
-    - "internal/config/project.go"
-  exclude-rules:
-    # Exclude some linters from running on tests files
-    - path: _test\.go
-      linters:
-        - gocyclo
-        - errcheck
-        - dupl
-        - gosec
-        - lll
-        - funlen
-    - path: cmd/valet/main.go
-      text: "os.Exit"
-      linters:
-        - gocritic
-    # Exclude known linter issues
-    - text: "weak cryptographic primitive"
-      linters:
-        - gosec
-    - text: "G107"
-      linters:
-        - gosec
-    # Security: syscall.Exec is intentional and documented
-    - text: "G204"
-      linters:
-        - gosec
-    # tailFile always receives the hardcoded logPath constant — not a user input
-    - text: "G304"
-      path: internal/tui/exec.go
-      linters:
-        - gosec
-    # Intentional blank assignments for best-effort operations
-    - path: internal/commands/help.go
-      linters:
-        - errcheck
-    - path: internal/commands/helpers.go
-      linters:
-        - errcheck
-    - path: internal/updater/check.go
-      linters:
-        - errcheck
-    # Bubble Tea requires value receivers on all model types — the Elm architecture
-    # mandates that Update returns a new model copy, not a mutated pointer.
-    # hugeParam warnings on all TUI models are expected and correct by design.
-    - path: internal/tui/
-      text: "hugeParam"
-      linters:
-        - gocritic
-    # TUI files use intentional blank assignments for best-effort operations.
-    - path: internal/tui/exec.go
-      linters:
-        - errcheck
-    - path: internal/tui/runner.go
-      linters:
-        - errcheck
-  exclude-use-default: false
   max-issues-per-linter: 0
   max-same-issues: 0
