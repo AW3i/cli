@@ -35,13 +35,19 @@ import (
 // startup on the first JSON task-start event, ensuring Ansible's vars_prompt
 // password input runs on the raw terminal. Non-TTY falls back to normal ansible.Run().
 func RunWithPanel(root *cobra.Command, args []string, version string) error {
-	// Let cobra handle help requests directly — bypassing the TUI path ensures
-	// the correct help text is shown rather than forwarding --help to ansible.
+	// Let cobra handle help requests and built-in (non-ansible) commands
+	// directly — bypassing the TUI/ansible path entirely.
 	for _, arg := range args {
 		if arg == "--help" || arg == "-h" {
 			os.Args = append([]string{os.Args[0]}, args...)
 			return root.Execute()
 		}
+	}
+	// If the resolved command has no "playbook" annotation it is a built-in
+	// cobra command (e.g. self-upgrade, version) — execute via cobra, not ansible.
+	if cmd, _, err := root.Find(args); err == nil && cmd != root && cmd.Annotations["playbook"] == "" {
+		os.Args = append([]string{os.Args[0]}, args...)
+		return root.Execute()
 	}
 
 	if !IsTTY() {
