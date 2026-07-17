@@ -41,8 +41,6 @@ type playbookMeta struct {
 	usage string
 	// helpText is the multi-line body from @help lines, shown in --help Long description.
 	helpText string
-	// playbookFile is the absolute path to the .yml file.
-	playbookFile string
 }
 
 // Discover scans the playbooks/ directory under repoDir, parses each
@@ -252,7 +250,7 @@ func parsePlaybookHeader(path string) (*playbookMeta, error) {
 	}
 	defer f.Close()
 
-	meta := &playbookMeta{playbookFile: path}
+	meta := &playbookMeta{}
 
 	inHelp := false
 	var helpLines []string
@@ -297,6 +295,8 @@ func parsePlaybookHeader(path string) (*playbookMeta, error) {
 			if val != "" {
 				helpLines = append(helpLines, val)
 			}
+		case strings.HasPrefix(content, "@author:"), strings.HasPrefix(content, "@platform:"):
+			// Informational annotations — not used by the CLI.
 		}
 	}
 
@@ -319,7 +319,9 @@ func parsePlaybookHeader(path string) (*playbookMeta, error) {
 func extractAnnotationValue(content, key string) string {
 	val := strings.TrimPrefix(content, key)
 	val = strings.TrimSpace(val)
-	// Strip surrounding double quotes.
-	val = strings.Trim(val, `"`)
+	// Strip surrounding double quotes individually so an unclosed quote
+	// (e.g. @description: "some text without closing quote) is still cleaned up.
+	val = strings.TrimPrefix(val, `"`)
+	val = strings.TrimSuffix(val, `"`)
 	return strings.TrimSpace(val)
 }
