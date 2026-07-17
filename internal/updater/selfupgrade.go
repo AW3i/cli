@@ -92,10 +92,11 @@ func upgradeCliIfNeeded(currentVersion string) (bool, error) {
 	assetName := fmt.Sprintf("valet-%s-%s", goos, goarch)
 
 	fmt.Printf("  Downloading %s...\n", assetName)
-	binPath, err := downloadAndVerifyBinary(latest, assetName)
+	binPath, tmpDir, err := downloadAndVerifyBinary(latest, assetName)
 	if err != nil {
 		return false, fmt.Errorf("download failed: %w", err)
 	}
+	defer os.RemoveAll(tmpDir)
 
 	installPath := "/usr/local/valet-sh/bin/valet"
 	fmt.Printf("  Installing to %s...\n", installPath)
@@ -104,23 +105,9 @@ func upgradeCliIfNeeded(currentVersion string) (bool, error) {
 		return false, fmt.Errorf("failed to create install directory: %w", err)
 	}
 
-	// Write to a .tmp file in the same directory as the final target so the
-	// subsequent rename is guaranteed to be on the same filesystem (atomic).
-	// A plain os.Rename from /tmp would fail with EXDEV on systems where /tmp
-	// and /usr/local are on separate filesystems (e.g. containers).
-	tmpFile := installPath + ".tmp"
-	if err := copyFile(binPath, tmpFile); err != nil {
-		return false, fmt.Errorf("failed to stage binary: %w", err)
-	}
-
-	if err := os.Chmod(tmpFile, 0o755); err != nil {
-		_ = os.Remove(tmpFile)
-		return false, fmt.Errorf("failed to chmod binary: %w", err)
-	}
-
-	if err := os.Rename(tmpFile, installPath); err != nil {
-		_ = os.Remove(tmpFile)
-		return false, fmt.Errorf("failed to install binary: %w", err)
+	// Try direct install first; fall back to sudo when the path is root-owned.
+	if err := installBinary(binPath, installPath); err != nil {
+		return false, err
 	}
 
 	fmt.Printf("%s CLI updated to %s\n", green("✓"), latest)
@@ -175,34 +162,72 @@ func upgradeAnsibleIfNeeded(repoDir string) (bool, error) {
 	return true, nil
 }
 
-// downloadAndVerifyBinary downloads the binary and checksums.txt from GitHub Releases,
-// verifies the SHA256 checksum, and returns the path to the downloaded binary.
-func downloadAndVerifyBinary(version, assetName string) (string, error) {
+// downloadAndVerifyBinary downloads the binary and checksums.txt from GitHub
+// Releases, verifies the SHA256 checksum, and returns the path to the
+// downloaded binary and the temp directory that contains it. The caller is
+// responsible for cleaning up the temp directory after using the binary.
+func downloadAndVerifyBinary(version, assetName string) (string, string, error) {
 	// FIXME(revert-before-upstream-merge): uses the fork's release repo (cliRepo,
 	// see check.go). Revert to "valet-sh/valet-sh-cli" once merged upstream.
 	releaseURL := fmt.Sprintf("https://github.com/%s/releases/download/%s", cliRepo, version)
 
 	tmpDir, err := os.MkdirTemp("", "valet-upgrade-*")
 	if err != nil {
-		return "", fmt.Errorf("failed to create temp directory: %w", err)
+		return "", "", fmt.Errorf("failed to create temp directory: %w", err)
 	}
-	defer os.RemoveAll(tmpDir)
 
 	checksumsPath := filepath.Join(tmpDir, "checksums.txt")
 	if err := downloadFile(releaseURL+"/checksums.txt", checksumsPath); err != nil {
-		return "", fmt.Errorf("failed to download checksums: %w", err)
+		os.RemoveAll(tmpDir)
+		return "", "", fmt.Errorf("failed to download checksums: %w", err)
 	}
 
 	binaryPath := filepath.Join(tmpDir, assetName)
 	if err := downloadFile(releaseURL+"/"+assetName, binaryPath); err != nil {
-		return "", fmt.Errorf("failed to download binary: %w", err)
+		os.RemoveAll(tmpDir)
+		return "", "", fmt.Errorf("failed to download binary: %w", err)
 	}
 
 	if err := verifySha256(binaryPath, checksumsPath, assetName); err != nil {
-		return "", fmt.Errorf("checksum verification failed: %w", err)
+		os.RemoveAll(tmpDir)
+		return "", "", fmt.Errorf("checksum verification failed: %w", err)
 	}
 
-	return binaryPath, nil
+	return binaryPath, tmpDir, nil
+}
+
+// installBinary copies src to installPath atomically.
+// If the destination is not writable by the current user, it retries with sudo.
+func installBinary(src, installPath string) error {
+	tmpFile := installPath + ".tmp"
+
+	err := copyFile(src, tmpFile)
+	if err == nil {
+		if err := os.Chmod(tmpFile, 0o755); err != nil {
+			_ = os.Remove(tmpFile)
+			return fmt.Errorf("failed to chmod binary: %w", err)
+		}
+		if err := os.Rename(tmpFile, installPath); err != nil {
+			_ = os.Remove(tmpFile)
+			return fmt.Errorf("failed to install binary: %w", err)
+		}
+		return nil
+	}
+
+	// Permission error — retry with sudo.
+	if !os.IsPermission(err) {
+		return fmt.Errorf("failed to stage binary: %w", err)
+	}
+
+	fmt.Println("  Requesting sudo to install to protected path...")
+	cmd := exec.Command("sudo", "install", "-m", "755", src, installPath)
+	cmd.Stdin = os.Stdin
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("failed to install binary (sudo): %w", err)
+	}
+	return nil
 }
 
 // downloadFile downloads a file from the given URL to the destination path.
