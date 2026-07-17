@@ -51,9 +51,17 @@ func SelfUpgrade(currentVersion string, repoDir string) error {
 		fmt.Fprintf(os.Stderr, "%s Ansible playbook update failed: %v\n", ansiRed+"✘"+ansiReset, ansibleErr)
 	}
 
-	// Only say "everything is up to date" when both checks succeeded and
-	// neither component was updated — not when a check failed.
-	if cliErr == nil && ansibleErr == nil && !cliUpdated && !ansibleUpdated {
+	// Runtime upgrade runs after the ansible pull so that if .runtime_version
+	// changed in the playbook repo, we immediately install the new version.
+	runtimeUpdated, runtimeErr := upgradeRuntimeIfNeeded(repoDir)
+	if runtimeErr != nil {
+		fmt.Fprintf(os.Stderr, "%s Runtime update failed: %v\n", ansiRed+"✘"+ansiReset, runtimeErr)
+	}
+
+	// Only say "everything is up to date" when all checks succeeded and
+	// nothing was updated — not when any check failed.
+	if cliErr == nil && ansibleErr == nil && runtimeErr == nil &&
+		!cliUpdated && !ansibleUpdated && !runtimeUpdated {
 		fmt.Println(green("✓ Everything is up to date."))
 	}
 
@@ -107,6 +115,152 @@ func upgradeCliIfNeeded(currentVersion string) (bool, error) {
 
 	fmt.Printf("%s CLI updated to %s\n", green("✓"), latest)
 	return true, nil
+}
+
+const (
+	// runtimeRepo is the GitHub repo that publishes Python venv tarballs.
+	runtimeRepo = "valet-sh/runtime"
+
+	// runtimeInstallBase is the directory the runtime tarball is extracted into.
+	// The tarball root is venv/, so the venv ends up at runtimeInstallBase/venv/.
+	runtimeInstallBase = "/usr/local/valet-sh"
+
+	// runtimeVersionFile records the currently installed runtime version.
+	// Written after each successful runtime installation.
+	runtimeVersionFile = "/usr/local/valet-sh/venv/.version"
+)
+
+// upgradeRuntimeIfNeeded compares the desired runtime version (from
+// {repoDir}/.runtime_version) with the installed version, and downloads
+// and extracts the new tarball when they differ.
+//
+// Note: valet-sh/runtime releases do not publish checksums — the download
+// is not checksum-verified. This mirrors the behaviour of install.sh.
+func upgradeRuntimeIfNeeded(repoDir string) (bool, error) {
+	desiredFile := filepath.Join(repoDir, ".runtime_version")
+	data, err := os.ReadFile(desiredFile)
+	if err != nil {
+		return false, fmt.Errorf("could not read .runtime_version: %w", err)
+	}
+	desired := strings.TrimSpace(string(data))
+	if desired == "" {
+		return false, fmt.Errorf(".runtime_version is empty")
+	}
+
+	installed := ""
+	if d, err := os.ReadFile(runtimeVersionFile); err == nil {
+		installed = strings.TrimSpace(string(d))
+	}
+
+	fmt.Printf("%s Checking for runtime updates...\n", blue("▶"))
+
+	if installed == desired {
+		fmt.Printf("%s Runtime is up to date (%s)\n", green("✓"), desired)
+		return false, nil
+	}
+
+	if installed != "" {
+		fmt.Printf("%s New runtime version available: %s → %s\n",
+			blue("▶"), installed, green(desired))
+	} else {
+		fmt.Printf("%s Installing runtime %s...\n", blue("▶"), green(desired))
+	}
+
+	assetName, err := runtimeAssetName()
+	if err != nil {
+		return false, fmt.Errorf("could not determine runtime asset: %w", err)
+	}
+
+	downloadURL := fmt.Sprintf("https://github.com/%s/releases/download/%s/%s",
+		runtimeRepo, desired, assetName)
+
+	fmt.Printf("  Downloading %s...\n", assetName)
+
+	tmpDir, err := os.MkdirTemp("", "valet-runtime-*")
+	if err != nil {
+		return false, fmt.Errorf("failed to create temp dir: %w", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	tarPath := filepath.Join(tmpDir, assetName)
+	if err := downloadFile(downloadURL, tarPath); err != nil {
+		return false, fmt.Errorf("failed to download runtime: %w", err)
+	}
+
+	fmt.Println("  Extracting runtime...")
+	if err := extractTar(tarPath, runtimeInstallBase); err != nil {
+		return false, err
+	}
+
+	if err := writeVersionFile(runtimeVersionFile, desired); err != nil {
+		fmt.Fprintf(os.Stderr, "  warning: could not save runtime version: %v\n", err)
+	}
+
+	fmt.Printf("%s Runtime updated to %s\n", green("✓"), desired)
+	return true, nil
+}
+
+// runtimeAssetName returns the platform-specific tarball name for the current OS/arch.
+// Linux:  ubuntu_{codename}-x86_64.tar.gz  (codename from /etc/os-release)
+// macOS:  macos-{arm64|x86_64}.tar.gz
+func runtimeAssetName() (string, error) {
+	arch := runtime.GOARCH
+	if arch == "amd64" {
+		arch = "x86_64"
+	}
+
+	switch runtime.GOOS {
+	case "darwin":
+		return fmt.Sprintf("macos-%s.tar.gz", arch), nil
+	default:
+		codename, err := osCodename()
+		if err != nil {
+			return "", err
+		}
+		return fmt.Sprintf("ubuntu_%s-%s.tar.gz", codename, arch), nil
+	}
+}
+
+// osCodename reads VERSION_CODENAME from /etc/os-release.
+func osCodename() (string, error) {
+	data, err := os.ReadFile("/etc/os-release")
+	if err != nil {
+		return "", fmt.Errorf("could not read /etc/os-release: %w", err)
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		if strings.HasPrefix(line, "VERSION_CODENAME=") {
+			return strings.Trim(strings.TrimPrefix(line, "VERSION_CODENAME="), `"`), nil
+		}
+	}
+	return "", fmt.Errorf("VERSION_CODENAME not found in /etc/os-release")
+}
+
+// extractTar extracts a .tar.gz archive into destDir.
+// Retries with sudo when the initial attempt fails (permission-protected paths).
+func extractTar(tarPath, destDir string) error {
+	cmd := exec.Command("tar", "-C", destDir, "-xzf", tarPath)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	if err := cmd.Run(); err == nil {
+		return nil
+	}
+	fmt.Println("  Requesting sudo to extract runtime...")
+	cmd = exec.Command("sudo", "tar", "-C", destDir, "-xzf", tarPath)
+	cmd.Stdin = os.Stdin
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("failed to extract runtime (sudo): %w", err)
+	}
+	return nil
+}
+
+// writeVersionFile writes version to path, creating parent directories as needed.
+func writeVersionFile(path, version string) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	return os.WriteFile(path, []byte(version+"\n"), 0o644)
 }
 
 // upgradeAnsibleIfNeeded checks for updates to the Ansible playbook repo
@@ -187,6 +341,7 @@ func downloadAndVerifyBinary(version, assetName string) (string, string, error) 
 		os.RemoveAll(tmpDir)
 		return "", "", fmt.Errorf("checksum verification failed: %w", err)
 	}
+	fmt.Printf("  %s Checksum verified\n", green("✓"))
 
 	return binaryPath, tmpDir, nil
 }
