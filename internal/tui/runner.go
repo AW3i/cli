@@ -188,7 +188,7 @@ func writeDebugLog(path string, lines []string) {
 	if len(lines) == 0 {
 		return
 	}
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
 	if err != nil {
 		return
 	}
