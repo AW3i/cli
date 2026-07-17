@@ -147,7 +147,7 @@ func Check(currentVersion string, originalArgs []string, repoDir string) {
 }
 
 // checkCliUpdate returns true if a newer CLI version is available, along with the latest tag.
-func checkCliUpdate(currentVersion string) (bool, string) {
+func checkCliUpdate(currentVersion string) (newer bool, latest string) {
 	latest, err := fetchLatestCliTag(apiTimeout)
 	if err != nil {
 		return false, ""

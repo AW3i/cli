@@ -254,9 +254,6 @@ func (m model) handleListKey(key string, msg tea.KeyPressMsg) (tea.Model, tea.Cm
 			m.stack[len(m.stack)-1].list = m.commandList
 			return m, nil
 		}
-		if m.vimMode && key == "/" {
-			// Vim mode: '/' activates filter (bubbles/list handles it below).
-		}
 	}
 
 	var cmd tea.Cmd

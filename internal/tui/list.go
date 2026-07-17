@@ -315,7 +315,7 @@ func renderHelpBar(vimMode bool, width int) string {
 }
 
 // renderInlineHelpBar renders the help line shown while the inline box is open.
-func renderInlineHelpBar(width int) string {
+func renderInlineHelpBar(_ int) string {
 	bindings := []struct{ key, desc string }{
 		{"?", "help"},
 		{"↵", "run"},

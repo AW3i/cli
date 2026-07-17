@@ -20,38 +20,9 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 )
 
-// OS constants mirror the values used by the Ansible shared-variables role.
-const (
-	OSUbuntu = "ubuntu"
-	OSMac    = "mac"
-)
 
-// Arch constants mirror the values used by the Ansible shared-variables role.
-const (
-	ArchAMD64 = "amd64"
-	ArchARM64 = "arm64"
-)
-
-func detectOS() string {
-	switch runtime.GOOS {
-	case "darwin":
-		return OSMac
-	default:
-		return OSUbuntu
-	}
-}
-
-func detectArch() string {
-	switch runtime.GOARCH {
-	case "arm64":
-		return ArchARM64
-	default:
-		return ArchAMD64
-	}
-}
 
 // AnsiblePlaybookBin returns the full path to the ansible-playbook binary,
 // preferring the valet-sh Python venv if present.

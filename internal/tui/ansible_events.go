@@ -128,8 +128,7 @@ func parseJSONEvent(line []byte, out *bytes.Buffer) tea.Msg {
 
 	case "v2_playbook_on_stats":
 		var logLines []string
-		logLines = append(logLines, strings.Repeat("─", 60))
-		logLines = append(logLines, "PLAY RECAP")
+		logLines = append(logLines, strings.Repeat("─", 60), "PLAY RECAP")
 		for host, s := range ev.Stats {
 			logLines = append(logLines, fmt.Sprintf(
 				"  %-20s ok=%-4d changed=%-4d failed=%-4d unreachable=%-4d skipped=%-4d",

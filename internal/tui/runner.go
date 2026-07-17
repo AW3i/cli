@@ -85,15 +85,16 @@ func waitForFirstJSONTask(r io.Reader) io.Reader {
 		if n > 0 {
 			b := oneByte[0]
 			buf.WriteByte(b)
-			if b == '\n' {
+			switch b {
+			case '\n':
 				if isJSONTaskStart(line) {
 					break
 				}
 				line = line[:0]
-			} else if b == '\r' {
+			case '\r':
 				// CR terminates spinner-text lines — reset without parsing.
 				line = line[:0]
-			} else {
+			default:
 				line = append(line, b)
 			}
 		}
@@ -205,7 +206,7 @@ func drainStdin() {
 	if err := syscall.SetNonblock(fd, true); err != nil {
 		return
 	}
-	defer syscall.SetNonblock(fd, false) //nolint:errcheck
+	defer syscall.SetNonblock(fd, false) //nolint:errcheck // best-effort restore; failure is non-fatal
 
 	buf := make([]byte, 256)
 	for {
@@ -256,12 +257,13 @@ func resolveRunOpts(root *cobra.Command, args []string) (*ansible.RunOpts, error
 	var verbose bool
 	var positionalArgs, opts []string
 	for _, token := range remaining {
-		if token == "--verbose" || token == "-v" {
+		switch {
+		case token == "--verbose" || token == "-v":
 			verbose = true
 			// Do not forward to opts — cobra's per-command flag, not a playbook opt.
-		} else if strings.HasPrefix(token, "-") {
+		case strings.HasPrefix(token, "-"):
 			opts = append(opts, token)
-		} else {
+		default:
 			positionalArgs = append(positionalArgs, token)
 		}
 	}
