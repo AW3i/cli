@@ -141,5 +141,3 @@ func helpFunc() func(*cobra.Command, []string) {
 		}
 	}
 }
-
-

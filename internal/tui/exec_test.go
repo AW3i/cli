@@ -133,8 +133,6 @@ func TestExecModelLogPromptEscQuits(t *testing.T) {
 	}
 }
 
-
-
 func TestExecModelTaskCounting(t *testing.T) {
 	m := NewExecModel("install", "1.0.0", nil, nil, nil, nil, 80, 24)
 
@@ -248,11 +246,11 @@ func TestExecModelProgressBarView(t *testing.T) {
 
 func TestParseJSONEvent(t *testing.T) {
 	tests := []struct {
-		name          string
-		line          string
-		wantType      string // "task", "output", "loglines", or "nil"
-		wantVal       string // expected taskName (for "task") or buffer content (for "output")
-		wantLogLines  int    // minimum number of log lines expected (for "loglines" and "task")
+		name            string
+		line            string
+		wantType        string // "task", "output", "loglines", or "nil"
+		wantVal         string // expected taskName (for "task") or buffer content (for "output")
+		wantLogLines    int    // minimum number of log lines expected (for "loglines" and "task")
 		wantLogContains string // substring expected in joined log lines
 	}{
 		{

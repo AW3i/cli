@@ -215,14 +215,14 @@ func (e ExecModel) handleKey(msg tea.KeyPressMsg) (ExecModel, tea.Cmd) {
 
 	if e.awaitingLogPrompt {
 		switch key {
-	case "y", "Y", "enter":
-		e.awaitingLogPrompt = false
-		e.logViewRequested = true
-		return e, tea.Quit
-	case "n", "esc", "q", "ctrl+c":
-		return e, tea.Quit
-	}
-	return e, nil
+		case "y", "Y", "enter":
+			e.awaitingLogPrompt = false
+			e.logViewRequested = true
+			return e, tea.Quit
+		case "n", "esc", "q", "ctrl+c":
+			return e, tea.Quit
+		}
+		return e, nil
 	}
 
 	if !e.done {

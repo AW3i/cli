@@ -275,8 +275,8 @@ func renderHelpBar(vimMode bool, width int) string {
 
 	if vimMode {
 		bindings = []struct{ key, desc string }{
-		{"h/l", "navigate"},
-		{"/", "search"},
+			{"h/l", "navigate"},
+			{"/", "search"},
 			{"?", "help"},
 			{"↵", "select"},
 			{"esc", "back"},
