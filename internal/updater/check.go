@@ -49,11 +49,19 @@ const (
 	// timestampFile records the last time the check ran.
 	timestampFile = "/usr/local/valet-sh/etc/.last_update_check"
 
-	// cliReleaseURL is the GitHub API endpoint for the latest CLI release.
-	cliReleaseURL = "https://api.github.com/repos/" + cliRepo + "/releases/latest"
+	// cliReleaseStableURL returns the latest non-prerelease, non-draft release.
+	cliReleaseStableURL = "https://api.github.com/repos/" + cliRepo + "/releases/latest"
+
+	// cliReleasesURL returns all releases (including pre-releases) ordered by
+	// created_at descending. Used by the dev channel.
+	cliReleasesURL = "https://api.github.com/repos/" + cliRepo + "/releases"
 
 	// apiTimeout caps the HTTP call so a slow network never blocks the user.
 	apiTimeout = 3 * time.Second
+
+	// UpdateChannelEnvVar is the environment variable that controls which
+	// release channel is tracked. Accepted values: "stable" (default), "dev".
+	UpdateChannelEnvVar = "VALET_UPDATE_CHANNEL"
 )
 
 // ANSI codes — same values as the Python callback plugin and help.go.
@@ -72,6 +80,7 @@ func info(s string) string  { return ansiBlue + "ℹ " + s + ansiReset }
 // releaseResponse is the subset of the GitHub releases API we care about.
 type releaseResponse struct {
 	TagName string `json:"tag_name"`
+	Draft   bool   `json:"draft"`
 }
 
 // Check runs the periodic update check for both CLI and Ansible playbook repo.
@@ -202,22 +211,31 @@ func writeTimestamp() {
 	_ = f.Close()
 }
 
-// fetchLatestCliTag queries the GitHub CLI releases API and returns the tag name.
-func fetchLatestCliTag() (string, error) {
-	client := &http.Client{Timeout: apiTimeout}
-	req, err := http.NewRequest(http.MethodGet, cliReleaseURL, http.NoBody)
-	if err != nil {
-		return "", err
+// updateChannel returns the release channel to track.
+// Defaults to "stable"; set VALET_UPDATE_CHANNEL=dev to include pre-releases.
+func updateChannel() string {
+	if strings.ToLower(os.Getenv(UpdateChannelEnvVar)) == "dev" {
+		return "dev"
 	}
-	req.Header.Set("Accept", "application/vnd.github+json")
+	return "stable"
+}
 
-	resp, err := client.Do(req)
+// fetchLatestCliTag returns the latest tag for the configured channel.
+func fetchLatestCliTag() (string, error) {
+	if updateChannel() == "dev" {
+		return fetchLatestAnyTag()
+	}
+	return fetchLatestStableTag()
+}
+
+// fetchLatestStableTag queries /releases/latest — GitHub only returns
+// non-prerelease, non-draft releases from this endpoint.
+func fetchLatestStableTag() (string, error) {
+	resp, err := githubGet(cliReleaseStableURL)
 	if err != nil {
 		return "", err
 	}
-	defer func() {
-		_ = resp.Body.Close()
-	}()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		return "", fmt.Errorf("GitHub API returned %d", resp.StatusCode)
@@ -227,8 +245,44 @@ func fetchLatestCliTag() (string, error) {
 	if err := json.NewDecoder(resp.Body).Decode(&rel); err != nil {
 		return "", err
 	}
-
 	return strings.TrimPrefix(rel.TagName, "v"), nil
+}
+
+// fetchLatestAnyTag queries /releases (full list, newest first) and returns
+// the first non-draft entry — stable or pre-release.
+func fetchLatestAnyTag() (string, error) {
+	resp, err := githubGet(cliReleasesURL)
+	if err != nil {
+		return "", err
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("GitHub API returned %d", resp.StatusCode)
+	}
+
+	var releases []releaseResponse
+	if err := json.NewDecoder(resp.Body).Decode(&releases); err != nil {
+		return "", err
+	}
+
+	for _, r := range releases {
+		if !r.Draft {
+			return strings.TrimPrefix(r.TagName, "v"), nil
+		}
+	}
+	return "", fmt.Errorf("no published releases found")
+}
+
+// githubGet performs a GET request to the GitHub API with the standard headers.
+func githubGet(url string) (*http.Response, error) {
+	client := &http.Client{Timeout: apiTimeout}
+	req, err := http.NewRequest(http.MethodGet, url, http.NoBody)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Accept", "application/vnd.github+json")
+	return client.Do(req)
 }
 
 // isNewer returns true when candidate is a higher semver than current.
