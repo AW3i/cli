@@ -16,7 +16,43 @@ package updater
 
 import (
 	"testing"
+	"os"
 )
+
+func TestUpdateChannel(t *testing.T) {
+	tests := []struct {
+		env  string
+		want string
+	}{
+		{"", "stable"},
+		{"stable", "stable"},
+		{"STABLE", "stable"},
+		{"dev", "dev"},
+		{"DEV", "dev"},
+		{"Dev", "dev"},
+		{"latest", "stable"}, // unrecognised → stable
+		{"prerelease", "stable"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.env, func(t *testing.T) {
+			t.Setenv(UpdateChannelEnvVar, tc.env)
+			got := updateChannel()
+			if got != tc.want {
+				t.Errorf("updateChannel() with %s=%q = %q, want %q",
+					UpdateChannelEnvVar, tc.env, got, tc.want)
+			}
+		})
+	}
+
+	// Unset env should default to stable.
+	t.Run("unset", func(t *testing.T) {
+		os.Unsetenv(UpdateChannelEnvVar)
+		if got := updateChannel(); got != "stable" {
+			t.Errorf("updateChannel() unset = %q, want %q", got, "stable")
+		}
+	})
+}
 
 func TestParseSemver(t *testing.T) {
 	tests := []struct {
