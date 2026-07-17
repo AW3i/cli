@@ -76,6 +76,9 @@ linters:
       # Version file 0644 is intentional (world-readable metadata)
       - text: "G306"
         linters: [gosec]
+      # writeVersionFile writes a trusted internal version string, not user input
+      - text: "G703"
+        linters: [gosec]
       # parseSemver: SplitN(n=3) guarantees at most 3 parts, array is [3]int — safe
       - text: "G602"
         linters: [gosec]

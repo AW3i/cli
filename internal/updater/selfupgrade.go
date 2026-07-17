@@ -99,7 +99,7 @@ func upgradeCliIfNeeded(currentVersion string) (bool, error) {
 	if err != nil {
 		return false, fmt.Errorf("download failed: %w", err)
 	}
-	defer os.RemoveAll(tmpDir)
+	defer func() { _ = os.RemoveAll(tmpDir) }()
 
 	installPath := "/usr/local/bin/valet.sh"
 	fmt.Printf("  Installing to %s...\n", installPath)
@@ -180,7 +180,7 @@ func upgradeRuntimeIfNeeded(repoDir string) (bool, error) {
 	if err != nil {
 		return false, fmt.Errorf("failed to create temp dir: %w", err)
 	}
-	defer os.RemoveAll(tmpDir)
+	defer func() { _ = os.RemoveAll(tmpDir) }()
 
 	tarPath := filepath.Join(tmpDir, assetName)
 	if err := downloadFile(downloadURL, tarPath); err != nil {
@@ -327,18 +327,18 @@ func downloadAndVerifyBinary(version, assetName string) (binPath, tmpDir string,
 
 	checksumsPath := filepath.Join(tmpDir, "checksums.txt")
 	if err := downloadFile(releaseURL+"/checksums.txt", checksumsPath); err != nil {
-		os.RemoveAll(tmpDir)
+		_ = os.RemoveAll(tmpDir)
 		return "", "", fmt.Errorf("failed to download checksums: %w", err)
 	}
 
 	binaryPath := filepath.Join(tmpDir, assetName)
 	if err := downloadFile(releaseURL+"/"+assetName, binaryPath); err != nil {
-		os.RemoveAll(tmpDir)
+		_ = os.RemoveAll(tmpDir)
 		return "", "", fmt.Errorf("failed to download binary: %w", err)
 	}
 
 	if err := verifySha256(binaryPath, checksumsPath, assetName); err != nil {
-		os.RemoveAll(tmpDir)
+		_ = os.RemoveAll(tmpDir)
 		return "", "", fmt.Errorf("checksum verification failed: %w", err)
 	}
 	fmt.Printf("  %s Checksum verified\n", green("✓"))
