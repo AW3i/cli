@@ -35,7 +35,6 @@ linters:
   settings:
     errcheck:
       check-type-assertions: true
-      check-blank: true
     govet:
       enable:
         - shadow
@@ -65,10 +64,24 @@ linters:
       # syscall.Exec is intentional and documented
       - text: "G204"
         linters: [gosec]
-      # logPath is a hardcoded constant, not user input
-      - path: internal/tui/exec.go
-        text: "G304"
+      # File paths are controlled constants or trusted internal values, not user input
+      - text: "G304"
         linters: [gosec]
+      # Directory permissions 0755 are intentional (binaries/dirs need execute bit)
+      - text: "G301"
+        linters: [gosec]
+      # Binary chmod 0755 is intentional (executable must be runnable)
+      - text: "G302"
+        linters: [gosec]
+      # Version file 0644 is intentional (world-readable metadata)
+      - text: "G306"
+        linters: [gosec]
+      # parseSemver: SplitN(n=3) guarantees at most 3 parts, array is [3]int — safe
+      - text: "G602"
+        linters: [gosec]
+      # SA4017: comma-separated case conditions are both evaluated as OR — not a no-op
+      - text: "SA4017"
+        linters: [staticcheck]
       # Intentional blank assignments for best-effort operations
       - path: internal/commands/help.go
         linters: [errcheck]

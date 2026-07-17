@@ -200,15 +200,15 @@ func RunSubprocess(opts *RunOpts) (*exec.Cmd, io.Reader, func(), error) {
 	if err := os.MkdirAll(filepath.Dir(logPath), 0755); err == nil {
 		if lf, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644); err == nil {
 			logFile = lf
-			fmt.Fprintf(logFile, "---------------------------------------------\n")
-			fmt.Fprintf(logFile, "Log started on %s.\n", time.Now().Format(time.ANSIC))
-			fmt.Fprintf(logFile, "---------------------------------------------\n\n")
+			_, _ = fmt.Fprintf(logFile, "---------------------------------------------\n")
+			_, _ = fmt.Fprintf(logFile, "Log started on %s.\n", time.Now().Format(time.ANSIC))
+			_, _ = fmt.Fprintf(logFile, "---------------------------------------------\n\n")
 		}
 	}
 
 	cleanup := func() {
 		if logFile != nil {
-			logFile.Close()
+			_ = logFile.Close()
 		}
 	}
 

@@ -77,7 +77,7 @@ func (m model) openHelp() (tea.Model, tea.Cmd) {
 }
 
 // handleHelpKey handles key events in the help view.
-func (m model) handleHelpKey(key string, msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+func (m model) handleHelpKey(key string, _ tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	maxScroll := len(m.help.lines) - (m.height - 6) // 6 lines for header, divider, footer
 	if maxScroll < 0 {
 		maxScroll = 0

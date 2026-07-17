@@ -387,15 +387,16 @@ func readTaskCmd(r io.Reader, out *bytes.Buffer) tea.Cmd {
 			n, err := r.Read(oneByte)
 			if n > 0 {
 				b := oneByte[0]
-				if b == '\n' {
+				switch b {
+				case '\n':
 					if msg := parseJSONEvent(line, out); msg != nil {
 						return msg
 					}
 					line = line[:0]
-				} else if b == '\r' {
+				case '\r':
 					// CR terminates spinner-text lines — reset without parsing.
 					line = line[:0]
-				} else {
+				default:
 					line = append(line, b)
 				}
 			}
