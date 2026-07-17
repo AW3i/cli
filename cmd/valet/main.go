@@ -35,10 +35,10 @@ func main() {
 	}
 
 	// Run the periodic update check before dispatching any command.
-	// Skipped on --help / --version / -h invocations so it never interrupts
-	// informational queries.
-	if !updater.IsHelpOrVersionCall(os.Args) {
-		updater.Check(Version, os.Args)
+	// Skipped on --help / --version / -h invocations and when the user is
+	// explicitly running self-upgrade (which is the update mechanism itself).
+	if !updater.IsHelpOrVersionCall(os.Args) && !updater.IsSelfUpgradeCall(os.Args) {
+		updater.Check(Version, os.Args, platform.RepoDir())
 	}
 
 	root := newRootCmd()
@@ -138,6 +138,24 @@ Configuration is driven by a .valet-sh.yml file in each project directory.`,
 		commands.ApplyHooks(discovered)
 		cmd.AddCommand(discovered...)
 	}
+
+	cmd.AddCommand(&cobra.Command{
+		Use:   "self-upgrade",
+		Short: "Check for and apply updates to valet-sh CLI and playbooks",
+		Long: `self-upgrade checks for new versions of both the valet-sh CLI binary and the
+Ansible playbook repository, and applies updates if available.
+
+Steps performed:
+  1. Checks GitHub releases for a newer CLI binary
+  2. Downloads and installs the binary with SHA256 verification
+  3. Checks the valet-sh playbook repo for upstream commits
+  4. Pulls the latest playbooks via git
+  5. Re-executes your original command with the updated CLI if the binary changed`,
+		SilenceUsage: true,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			return updater.SelfUpgrade(Version, os.Args, platform.RepoDir())
+		},
+	})
 
 	return cmd
 }
