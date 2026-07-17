@@ -38,10 +38,10 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4.2.2
+        uses: actions/checkout@v4.3.1
 
       - name: Set up Go
-        uses: actions/setup-go@v5.4.0
+        uses: actions/setup-go@v6.5.0
         with:
           go-version-file: go.mod
           cache-dependency-path: go.sum
@@ -70,10 +70,10 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4.2.2
+        uses: actions/checkout@v4.3.1
 
       - name: Set up Go
-        uses: actions/setup-go@v5.4.0
+        uses: actions/setup-go@v6.5.0
         with:
           go-version-file: go.mod
           cache-dependency-path: go.sum

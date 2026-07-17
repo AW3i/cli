@@ -59,10 +59,10 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4.2.2
+        uses: actions/checkout@v4.3.1
 
       - name: Set up Go
-        uses: actions/setup-go@v5.4.0
+        uses: actions/setup-go@v6.5.0
         with:
           go-version-file: go.mod
           cache-dependency-path: go.sum
@@ -84,7 +84,7 @@ jobs:
             ./cmd/valet
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4.6.2
+        uses: actions/upload-artifact@v5.0.0
         with:
           name: valet-${{ matrix.goos }}-${{ matrix.goarch }}
           path: dist/valet-${{ matrix.goos }}-${{ matrix.goarch }}
@@ -96,10 +96,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4.2.2
+        uses: actions/checkout@v4.3.1
 
       - name: Download all artifacts
-        uses: actions/download-artifact@v4.3.0
+        uses: actions/download-artifact@v6.0.0
         with:
           path: dist
           merge-multiple: true
@@ -111,7 +111,7 @@ jobs:
           cat checksums.txt
 
       - name: Create Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v2.6.2
         with:
           name: "valet-sh CLI ${{ github.ref_name }}"
           draft: false
