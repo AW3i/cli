@@ -93,7 +93,7 @@ func upgradeCliIfNeeded(currentVersion string) (bool, error) {
 	}
 	defer os.RemoveAll(tmpDir)
 
-	installPath := "/usr/local/valet-sh/bin/valet"
+	installPath := "/usr/local/bin/valet.sh"
 	fmt.Printf("  Installing to %s...\n", installPath)
 
 	if err := os.MkdirAll(filepath.Dir(installPath), 0o755); err != nil {
