@@ -153,7 +153,7 @@ Steps performed:
   5. Re-executes your original command with the updated CLI if the binary changed`,
 		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			return updater.SelfUpgrade(Version, os.Args, platform.RepoDir())
+			return updater.SelfUpgrade(Version, platform.RepoDir())
 		},
 	})
 

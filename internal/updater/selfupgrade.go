@@ -31,7 +31,12 @@ import (
 
 // SelfUpgrade checks for updates to both the CLI binary and the Ansible
 // playbook repo, and applies them if newer versions are available.
-func SelfUpgrade(currentVersion string, originalArgs []string, repoDir string) error {
+//
+// Re-executing the original user command after a CLI update is the
+// responsibility of the periodic check caller (check.go), not this function.
+// Calling reExec here would cause an infinite loop when the user runs
+// 'valet self-upgrade' directly.
+func SelfUpgrade(currentVersion string, repoDir string) error {
 	fmt.Println()
 	fmt.Println(blue("▶ Checking for updates..."))
 	fmt.Println()
@@ -50,16 +55,6 @@ func SelfUpgrade(currentVersion string, originalArgs []string, repoDir string) e
 	// neither component was updated — not when a check failed.
 	if cliErr == nil && ansibleErr == nil && !cliUpdated && !ansibleUpdated {
 		fmt.Println(green("✓ Everything is up to date."))
-		fmt.Println()
-		return nil
-	}
-
-	// If CLI was updated, re-exec the original command with the new binary
-	if cliUpdated {
-		fmt.Println()
-		fmt.Printf("%s Re-executing command with updated CLI...\n", blue("▶"))
-		fmt.Println()
-		reExec(originalArgs)
 	}
 
 	fmt.Println()
