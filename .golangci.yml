@@ -14,6 +14,8 @@
 #   limitations under the License.
 ##
 
+version: "2"
+
 run:
   timeout: 5m
   issues-exit-code: 1
