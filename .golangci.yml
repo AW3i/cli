@@ -16,7 +16,6 @@
 
 run:
   timeout: 5m
-  go: '1.22'
   issues-exit-code: 1
   tests: true
 
