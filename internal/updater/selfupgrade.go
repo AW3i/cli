@@ -98,9 +98,17 @@ func upgradeCliIfNeeded(currentVersion string) (bool, error) {
 	installPath := "/usr/local/valet-sh/bin/valet"
 	fmt.Printf("  Installing to %s...\n", installPath)
 
+	if err := os.MkdirAll(filepath.Dir(installPath), 0o755); err != nil {
+		return false, fmt.Errorf("failed to create install directory: %w", err)
+	}
+
+	// Write to a .tmp file in the same directory as the final target so the
+	// subsequent rename is guaranteed to be on the same filesystem (atomic).
+	// A plain os.Rename from /tmp would fail with EXDEV on systems where /tmp
+	// and /usr/local are on separate filesystems (e.g. containers).
 	tmpFile := installPath + ".tmp"
-	if err := os.Rename(binPath, tmpFile); err != nil {
-		return false, fmt.Errorf("failed to move downloaded binary: %w", err)
+	if err := copyFile(binPath, tmpFile); err != nil {
+		return false, fmt.Errorf("failed to stage binary: %w", err)
 	}
 
 	if err := os.Chmod(tmpFile, 0o755); err != nil {
@@ -108,7 +116,6 @@ func upgradeCliIfNeeded(currentVersion string) (bool, error) {
 		return false, fmt.Errorf("failed to chmod binary: %w", err)
 	}
 
-	// Atomic rename (atomic on POSIX)
 	if err := os.Rename(tmpFile, installPath); err != nil {
 		_ = os.Remove(tmpFile)
 		return false, fmt.Errorf("failed to install binary: %w", err)
@@ -220,6 +227,25 @@ func downloadFile(url, dest string) error {
 	}()
 
 	_, err = io.Copy(f, resp.Body)
+	return err
+}
+
+// copyFile copies src to dst, creating dst if it does not exist.
+// Used instead of os.Rename when src and dst may be on different filesystems.
+func copyFile(src, dst string) error {
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = in.Close() }()
+
+	out, err := os.Create(dst)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = out.Close() }()
+
+	_, err = io.Copy(out, in)
 	return err
 }
 

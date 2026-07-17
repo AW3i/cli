@@ -81,7 +81,8 @@ type releaseResponse struct {
 //   - currentVersion is "dev" (local development build)
 //
 // originalArgs is os.Args so the command can be re-executed after a CLI update.
-func Check(currentVersion string, originalArgs []string) {
+// repoDir is the path to the valet-sh Ansible repo (typically platform.RepoDir()).
+func Check(currentVersion string, originalArgs []string, repoDir string) {
 	if currentVersion == "dev" {
 		return
 	}
@@ -93,8 +94,6 @@ func Check(currentVersion string, originalArgs []string) {
 	// Always write the timestamp first so a network error doesn't cause
 	// the check to hammer the API on every subsequent invocation.
 	writeTimestamp()
-
-	repoDir := "/usr/local/valet-sh/valet-sh"
 
 	cliNewer, cliLatest := checkCliUpdate(currentVersion)
 	ansibleNewer := checkAnsibleUpdate(repoDir)
@@ -270,6 +269,18 @@ func IsHelpOrVersionCall(args []string) bool {
 	for _, a := range args[1:] {
 		switch a {
 		case "--help", "-h", "--version", "-v", "help":
+			return true
+		}
+	}
+	return false
+}
+
+// IsSelfUpgradeCall returns true when the user is running 'valet self-upgrade'
+// directly — the periodic check should not run in this case since self-upgrade
+// is already the update mechanism.
+func IsSelfUpgradeCall(args []string) bool {
+	for _, a := range args[1:] {
+		if a == "self-upgrade" {
 			return true
 		}
 	}
