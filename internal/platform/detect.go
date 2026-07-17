@@ -22,8 +22,6 @@ import (
 	"path/filepath"
 )
 
-
-
 // AnsiblePlaybookBin returns the full path to the ansible-playbook binary,
 // preferring the valet-sh Python venv if present.
 func AnsiblePlaybookBin() string {
